@@ -1,0 +1,1 @@
+{"ts": "2026-10-20T06:21:32Z", "pid": "prop_20261020-140405_9547", "mid": "mem_fe3d8e72_77292", "scope": "global", "title": "新增或封装的 Skill 默认配置为全局可用", "supersedes": "", "before": {"active": 3, "chars": 160, "superseded": 0, "pinned": 0, "coverage": 0.0416}, "after": {"active": 4, "chars": 294, "superseded": 0, "pinned": 0, "coverage": 0.0545}}

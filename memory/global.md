@@ -43,3 +43,20 @@ source.agentIds: forge, atlas
 
 
 
+---
+memoryId: mem_fe3d8e72_77292
+timestamp: 2026-10-20T06:21:32Z
+scope: global
+category: preference
+title: 新增或封装的 Skill 默认配置为全局可用
+tags: [convention, approved]
+confidence: high
+trust: self
+source.messageIds: card:oc-e6fd7cd5565d48788842, session:ses_ea8f58a96ffex5UF00fD83GXIj, proposal:prop_20261020-140405_9547
+source.agentIds: evolve, user-approved
+---
+
+触发条件: 新增、封装或安装 OpenCode Skill。
+动作: 将 Skill 注册到全局 Skill 目录，确保所有项目均可使用，不要只配置到当前项目。
+适用范围: OpenCode Skill 的创建、封装与安装。
+

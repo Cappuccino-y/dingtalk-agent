@@ -1,0 +1,17 @@
+{
+  "type": "convention",
+  "title": "新增或封装的 Skill 默认配置为全局可用",
+  "scope": "global",
+  "category": "preference",
+  "confidence": "high",
+  "body": "触发条件: 新增、封装或安装 OpenCode Skill。\n动作: 将 Skill 注册到全局 Skill 目录，确保所有项目均可使用，不要只配置到当前项目。\n适用范围: OpenCode Skill 的创建、封装与安装。",
+  "evidence": "注意这个 skill 应该是全局的 skill 都能用哈，不要只配成这个项目的",
+  "risk": "全局 Skill 会对所有项目可见，可能与其他项目中的同名 Skill 或依赖发生冲突。",
+  "expected_gain": "避免为不同项目重复创建 Skill，并提高 Skill 的跨项目复用能力。",
+  "source": "evolve",
+  "proposed_by": "MiniMax-M3.1-Flash",
+  "id": "prop_20261020-140405_9547",
+  "created_at": "2026-10-20T06:04:05Z",
+  "status": "approved",
+  "decided_at": "2026-10-20T06:21:32Z"
+}
