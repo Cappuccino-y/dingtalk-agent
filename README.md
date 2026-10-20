@@ -44,9 +44,8 @@
 ```mermaid
 %%{init: {'theme':'base','themeVariables':{'primaryColor':'#eaf2ff','primaryTextColor':'#0d1117','primaryBorderColor':'#4c8eda','lineColor':'#6e7781','secondaryColor':'#f6f8fa','tertiaryColor':'#ffffff','fontFamily':'ui-sans-serif, system-ui, sans-serif'}}}%%
 flowchart TB
-  J["交互流水<br/>journal.md"] --> E["每日扫描<br/>evolve.py"]
-  E --> L["LLM 提案<br/>零工具"]
-  L --> C["钉钉审批卡"]
+  J["交互流水<br/>journal.md"] --> E["每日扫描 evolve.py<br/>零工具 LLM 提提案"]
+  E --> C["钉钉审批卡"]
   C -->|批准| A["确定性落地<br/>apply_proposal.py"]
   C -->|驳回| R["归档<br/>下次避开"]
   A --> M["记忆库 + git commit"]
