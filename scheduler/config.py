@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import os
 
-MAINTOY = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# 本仓库根目录：D:\PythonProject\dingtalk-agent
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # 运行期状态放用户目录，不进仓库（仓库里已有太多运行产物了）
 HOME = os.environ.get("SCHEDULER_HOME") or os.path.join(

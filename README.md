@@ -4,8 +4,9 @@
 接手（能跑命令、改文件、查资料、看行情），结果以钉钉 AI 卡片流式回显。
 
 **这是一个独立仓库**，从 `D:\PythonProject\MainToy` 里抽出来的（详见
-`docs/bot-architecture.md` 的「迁移说明」）。交易类脚本、定时作业、天勤账户
-仍然留在 MainToy，本仓库不持有。
+`docs/bot-architecture.md` 的「迁移说明」）。机器人本体、行情 MCP、数据层、
+调度器**以及三个定时作业**（早报 / IC 监控 / IC 周报）现在都在本仓库里。
+交易类脚本、策略回测、天勤账户仍然留在 MainToy，本仓库不持有。
 
 ## 结构
 
@@ -16,14 +17,21 @@ tools/card_v2.py         卡片 v2：公共模板 + 卡片 OpenAPI
 tools/market_mcp.py      行情 MCP server（stdio）：quote/overseas/wave/tech/news
 tools/wave_engine.py     道氏 + 艾略特波浪的确定性计算
 tools/market_data.py     行情抓取（新浪）
+tools/market_chart.py    指数点位图（中证1000 支撑/压力 + 均线）
 tools/dingtalk_push.py   主动推送文本/图片/文件
 tools/notifycation.py    钉钉 webhook / access_token
 tools/bot_presence.py    停机三时点告知（重启前 / 掉线 / 已恢复）
 tools/bot_restart.py     协同重启（只写标记，不 kill 自己）
-datalayer/               baostock_daily / report_news_data / eastmoney_patch / trade_data_fetcher
-scheduler/               调度器骨架（作业清单为空，作业在 MainToy）
+datalayer/               baostock_daily / report_news_data / eastmoney_patch /
+                         trade_data_fetcher / akshare_multi_period / akshare_helper
+jobs/premarket_push.py   盘前早报（scheduler 的 premarket 作业）
+jobs/ic_signal_monitor.py IC 期货多信号监控（scheduler 的 ic_monitor 作业）
+jobs/ic_weekly_report.py  IC 抄底信号周报（scheduler 的 ic_weekly 作业）
+scheduler/               调度器本体 + 作业注册表（registry.py 里是权威作业清单）
+var/                     运行期产物（IC 信号/状态/周报 PNG，.gitignore 已忽略）
 .opencode-bot/           机器人专属 Location：AGENTS.md（行为规则）+ opencode.json
 docs/bot-architecture.md 架构与维护手册（**改代码前先读**）
+docs/scheduler.md        调度器语义与日常操作
 ```
 
 ## 起来一次

@@ -1207,6 +1207,41 @@ def extract_out_track_id(data):
     return ""
 
 
+def finish_ask_card(out_track_id, status, summary="", app_key=None, app_secret=None):
+    """**按 outTrackId 更新一张 ASK 卡片的状态**（不需要卡片对象）。
+
+    场景：卡片是别的进程创建的（比如 scheduler 的 evolve 作业推的审批卡），
+    当前进程没有那张卡片的对象，但更新接口只要 outTrackId 就行。
+
+    status 用 ASK_STATUS_* 常量；summary 会写进 question_desc，
+    让用户在卡面上直接看到「已批准 / 已驳回」而不是一直停在待提交。
+    """
+    if not out_track_id:
+        return False
+    btn = ASK_STATUS_BTN.get(status, "")
+    params = {"card_status": status}
+    if btn:
+        params["form_btn_text"] = btn
+    if summary:
+        params["question_desc"] = summary
+    body = {
+        "outTrackId": out_track_id,
+        "cardData": {"cardParamMap": params},
+        "cardUpdateOptions": {"updateCardDataByKey": True},
+        "userIdType": 1,
+    }
+    try:
+        r = _request("PUT", API_BASE + "/v1.0/card/instances",
+                     headers={"x-acs-dingtalk-access-token":
+                              _TokenCache.get(app_key, app_secret),
+                              "Content-Type": "application/json"},
+                     data=json.dumps(CardV2._normalize_body(body)))
+        return bool(r)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("问句卡状态更新失败（%s）：%s", out_track_id, e)
+        return False
+
+
 class AskCard:
     """一张结构化提问卡（表单模板 `c2a6355b…`）。
 

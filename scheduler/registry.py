@@ -14,7 +14,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
 
-from .config import MAINTOY, PYTHON
+from .config import PYTHON, REPO
 
 WEEKDAYS = (0, 1, 2, 3, 4)   # 周一~周五
 
@@ -33,17 +33,70 @@ class Job:
     notify_on_fail: bool = True          # 失败是否推钉钉
     manual_ok: bool = True               # 允许手动/聊天触发（定时之外的第二个入口）
     aliases: tuple[str, ...] = ()        # 聊天快捷名，不含斜杠：/ic → ic_monitor
-    cwd: str = field(default=MAINTOY)
+    cwd: str = field(default=REPO)
 
     @property
     def occurrence_fmt(self) -> str:
         return "%Y-%m-%dT%H:%M"
 
 
+# 三个业务脚本已经全部搬进本仓库的 jobs/ 目录（2026-10-20），
+# 调度语义（时间点/窗口/重试/别名）与老仓库完全一致。
 JOBS: list[Job] = [
-    # 本仓库只带交互机器人，交易作业（盘前早报 / IC 监控 / IC 周报）
-    # 仍留在旧项目 D:\PythonProject\MainToy\scheduler\registry.py。
-    # 要在这里加作业：把脚本搬进本仓库，然后照上面的 Job(...) 写法加一条。
+    Job(
+        id="premarket",
+        name="盘前早报",
+        argv=[PYTHON, os.path.join(REPO, "jobs", "premarket_push.py")],
+        at=(8, 0),
+        window_min=180,          # 开机时间不固定，11:00 前起来都还值得发
+        dow=None,                # 周末/节假日也发（内容自己会换成「回顾+下个交易日」）
+        timeout_s=1800,          # agent 可能要跑十几分钟
+        max_attempts=1,          # 重跑代价高，且它自己有 min-interval 去重
+        aliases=("早报", "premarket"),
+        cwd=REPO,
+    ),
+    Job(
+        id="ic_monitor",
+        name="IC 信号监控",
+        argv=[PYTHON, os.path.join(REPO, "jobs", "ic_signal_monitor.py"),
+              "--once"],
+        at=(8, 50),
+        window_min=70,           # 8:50~10:00，和脚本原本的早盘窗口一致
+        timeout_s=600,
+        max_attempts=3,
+        retry_delay_s=180,
+        aliases=("ic", "IC监控", "IC信号"),
+        cwd=REPO,
+    ),
+    Job(
+        id="ic_weekly",
+        name="IC 周报",
+        argv=[PYTHON, os.path.join(REPO, "jobs", "ic_weekly_report.py")],
+        at=(9, 5),               # 排在 IC 监控之后，用的是同一份收盘数据
+        window_min=100,
+        dow=(0,),                # 只在周一
+        timeout_s=900,
+        max_attempts=2,
+        retry_delay_s=300,
+        aliases=("周报", "weekly"),
+        cwd=REPO,
+    ),
+    Job(
+        id="evolve",
+        name="知识与行为改进扫描",
+        # 读 journal + 记忆索引 + 问答存档 -> LLM 提提案 -> 推钉钉审批卡。
+        # 提案者直连 LLM（无工具），落地由 tools/apply_proposal.py 确定性完成。
+        argv=[PYTHON, os.path.join(REPO, "tools", "evolve.py")],
+        at=(3, 0),                 # 凌晨 3 点跑，不打扰人
+        window_min=60,            # 3:00~4:00 之间起来都还能补跑
+        dow=None,                 # 每天都跑（周末也有新交互）
+        timeout_s=900,
+        max_attempts=1,           # LLM 调用贵，别重复跑
+        retry_delay_s=600,
+        notify_on_fail=True,
+        aliases=("改进", "复盘", "evolve"),
+        cwd=REPO,
+    ),
 ]
 
 

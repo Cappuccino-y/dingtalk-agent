@@ -15,9 +15,9 @@ import sys
 from . import db
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-MAINTOY = os.path.dirname(HERE)
-if MAINTOY not in sys.path:
-    sys.path.insert(0, MAINTOY)
+REPO = os.path.dirname(HERE)
+if REPO not in sys.path:
+    sys.path.insert(0, REPO)
 
 log = logging.getLogger("scheduler.notify")
 

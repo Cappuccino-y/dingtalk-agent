@@ -1206,12 +1206,100 @@ def set_retry_hook(fn):
     _RETRY_HOOK = fn
 
 
+def _journal_feedback(kind, conv, session_id, extra=""):
+    """把用户反馈写进 append-only 的 journal（改进扫描的证据来源）。
+
+    retry / stop 是**最强的负反馈信号**（比"这不太对"这种含糊表达强得多），
+    所以优先记它们。写失败绝不影响主流程。
+    """
+    try:
+        from tools import memory_store as ms
+        ms.append_journal(
+            kind, f"用户反馈：{kind}",
+            conv=conv or "-", session=session_id or "-",
+            detail=extra or "-")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("journal 写入失败：%s", e)
+
+
+def _handle_evolve_proposal(conv, action, params, log=None, out_track=""):
+    """处理改进提案审批卡的回调（**无状态**：提案 id 编在 question_id 里）。
+
+    evolve 作业是 scheduler 的独立子进程，推审批卡时 bot 进程里没有等待槽，
+    所以这里按提案 id 直接读 memory/proposals/<id>.json 落地/驳回。
+    这样即使 bot 中途重启，审批也照样能处理。
+    """
+    log = log or logger
+    qid = ""
+    for src in (action or "", (params or {}).get("question_id") or "",
+                (params or {}).get("questionId") or ""):
+        if isinstance(src, str) and src.startswith("evolve:"):
+            qid = src.strip()
+            break
+    if not qid:
+        return False
+    pid = qid.split("evolve:", 1)[1].strip()
+    if not pid:
+        return False
+
+    try:
+        from tools import card_v2 as _cv
+        from tools import memory_store as _ms
+        from tools import apply_proposal as _ap
+    except Exception as e:  # noqa: BLE001
+        log.warning("改进提案处理：导入失败 %s", e)
+        return False
+
+    answers = _cv.parse_ask_answer(params) or {}
+    decision = answers.get("decision")
+    if isinstance(decision, list):
+        decision = decision[0] if decision else ""
+    decision = (decision or "").strip()
+    if (params or {}).get("user_cancel"):
+        decision = "defer"
+
+    def _finish(status, summary):
+        """回写卡片状态 —— 卡片是别的进程推的，bot 进程没有它的对象，
+        但更新接口只要 outTrackId。不回写的话卡片会一直停在「待提交」，
+        用户点了像没反应。"""
+        try:
+            _cv.finish_ask_card(out_track, status, summary)
+        except Exception as e:  # noqa: BLE001
+            log.warning("改进提案卡片状态回写失败：%s", e)
+
+    try:
+        if decision == "approve":
+            ok, msg = _ap.approve(pid)
+            _finish(_cv.ASK_STATUS_SUBMITTED if ok else _cv.ASK_STATUS_CANCELLED,
+                    ("✅ 已批准并落地：%s" % msg) if ok else ("❌ 批准失败：%s" % msg))
+        elif decision == "reject":
+            ok, msg = _ap.reject(pid, note="用户在钉钉审批卡上驳回")
+            _finish(_cv.ASK_STATUS_CANCELLED,
+                    "🚫 已驳回：%s" % msg if ok else "❌ 驳回失败：%s" % msg)
+        elif decision == "defer":
+            ok, msg = _ap.defer(pid)
+            _finish(_cv.ASK_STATUS_EXPIRED, "⏸ 已暂缓：%s" % msg)
+        else:
+            log.info("改进提案：无法识别的决定 %r conv=%s pid=%s",
+                     decision, conv, pid)
+            _finish(_cv.ASK_STATUS_CANCELLED, "❓ 没看懂你的选择，提案保持待审批")
+            return False
+    except Exception as e:  # noqa: BLE001
+        log.warning("改进提案处理失败 pid=%s: %s", pid, e)
+        _finish(_cv.ASK_STATUS_CANCELLED, "❌ 处理出错：%s" % e)
+        return False
+
+    log.info("改进提案 %s：%s（决定=%s）", pid, msg, decision or "-")
+    return bool(ok)
+
+
 def handle_card_action(conv, action, params, log=None):
     """卡片按钮的统一入口（Stream 卡片回调处理器调用）。
 
     - ask   ：结算正在等答案的提问卡
     - stop  ：中断当前这一轮
     - retry ：重放最近一次提问
+    - evolve:xxx ：改进提案的审批（跨进程，无状态处理）
     返回 True 表示已处理。
     """
     log = log or logger
@@ -1219,6 +1307,11 @@ def handle_card_action(conv, action, params, log=None):
     # 表单提交：提问卡的回传没有固定 actionId（模板会把 question_id 当 actionId
     # 回来），只要带表单答案就算作答。
     if params and (params.get("form") or params.get("user_cancel")):
+        # 改进提案审批卡是**跨进程**的（evolve 作业是独立子进程，推卡时
+        # bot 进程里没有等待槽），所以必须先按 question_id 里的提案 id
+        # 做无状态处理，不能直接丢给 CARD_ACTIONS。
+        if _handle_evolve_proposal(conv, action, params, log=log):
+            return True
         return CARD_ACTIONS.resolve(conv, action or "ask", params)
     if not action:
         return False
@@ -1235,6 +1328,7 @@ def handle_card_action(conv, action, params, log=None):
                 return False
             hit = OpenCodeService().interrupt(sid)
             log.info("卡片停止：conv=%s sid=%s hit=%s", conv, sid, hit)
+            _journal_feedback("stop", conv, sid, extra="用户中断了这一轮")
             return True
         except Exception as e:  # noqa: BLE001
             log.warning("卡片停止失败：%s", e)
@@ -1251,6 +1345,7 @@ def handle_card_action(conv, action, params, log=None):
         try:
             _RETRY_HOOK(conv, text)
             log.info("卡片重试已触发：conv=%s", conv)
+            _journal_feedback("retry", conv, "", extra=f"用户要求重做：{text[:120]}")
             return True
         except Exception as e:  # noqa: BLE001
             log.warning("卡片重试失败：%s", e)
@@ -1476,6 +1571,11 @@ def dispatch_card_callback(data, log=None) -> bool:
             # 有了这条日志才能一次定位（而不是猜）。
             log.warning("卡片回调无法解析动作，原始载荷：%s",
                         json.dumps(data, ensure_ascii=False)[:800])
+        # 改进提案审批卡是**跨进程**推的（evolve 作业是独立子进程），bot 进程的
+        # outTrackId→conv 内存表里没有它。它的审批信息全编码在提案 id 里，
+        # 所以必须在 conv 查不到之前就处理掉。
+        if _handle_evolve_proposal(conv, action, params, log=log, out_track=out_track):
+            return True
         if not conv:
             log.warning("卡片回调找不到归属会话（outTrackId=%s），忽略", out_track)
             return False

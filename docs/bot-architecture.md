@@ -62,15 +62,18 @@
 | `tools/market_mcp.py` | 行情的 MCP server（stdio），5 个工具 |
 | `tools/wave_engine.py` | 道氏 + 艾略特波浪的**确定性**计算引擎 |
 | `tools/market_data.py` | 行情抓取（新浪实时 / 国际指数） |
+| `tools/market_chart.py` | 指数点位图（中证1000 支撑/压力 + 均线，早报附图用） |
 | `tools/bot_restart.py` | 写重启标记（协同重启），绝不 kill 自己 |
 | `tools/bot_presence.py` | 停机三时点告知：重启前 / 掉线 / 已恢复 |
 | `tools/dingtalk_push.py` | 主动推文本/图片/文件（agent 与作业都用它） |
 | `tools/notifycation.py` | 钉钉 webhook、企业 access_token、图片上传 |
 | `tools/llm_client.py` | 火山 Ark 的小模型调用（`report_news_data` 用） |
-| `datalayer/` | 被 MCP 复用的数据层：`baostock_daily`（K 线）、`report_news_data`（金十）、`eastmoney_patch`、`trade_data_fetcher`、`akshare_multi_period` |
-| `scheduler/` | 调度器骨架（作业清单为空） |
+| `datalayer/` | 被 MCP 和作业复用的数据层：`baostock_daily`（K 线）、`report_news_data`（金十）、`eastmoney_patch`、`trade_data_fetcher`、`akshare_multi_period`、`akshare_helper`（QVIX/期货） |
+| `jobs/` | 三个定时作业的脚本：`premarket_push`（早报）、`ic_signal_monitor`（IC 监控）、`ic_weekly_report`（IC 周报） |
+| `scheduler/` | 调度器本体 + 作业注册表（`registry.py` 是权威作业清单） |
+| `var/` | 作业的运行期产物：IC 信号/状态/日志、周报 PNG（已 gitignore） |
 | `.opencode-bot/` | 机器人**专属 Location**：`AGENTS.md` + `opencode.json`（MCP/权限） |
-| `bot/bridge_data/` | 运行期状态：会话映射、在飞回合、卡片档案、画像、图片 |
+| `bot/bridge_data/` | 运行期状态：会话映射、在飞回合、卡片档案、画像、图片、早报会话 |
 | `bot/logs/` | `dingtalk_v3.log`、stdout/stderr、pid |
 | `conversation_history/` | `report_news_data` 的落盘目录（cwd 相对，已 gitignore） |
 
@@ -82,6 +85,8 @@
 - `last_prompt.json`：最近一次提问，卡片「重试」按钮重放用
 - `card_archive.json`：卡片档案（全局 200 条 / 每会话 30 条，文本相似度匹配 ≥0.60）
 - `presence.json`：最后存活时间 + 停机标记
+- `premarket_session.json`：早报会话映射（机器人启动时清空，早报脚本写）
+- `premarket_last_sent.json`：早报最近一次推送时间（min-interval 去重）
 
 ---
 
@@ -202,20 +207,23 @@
 
 ---
 
-## 七、调度器（本仓库只有骨架）
+## 七、调度器（本体 + 作业全在本仓库）
 
 本仓库带 `scheduler/` 整套代码（stdlib 实现，约 200 行主循环 + SQLite 运行记录），
-但 `JOBS` 清单是**空的**：
+`JOBS` 清单里有**三个作业**，脚本都在本仓库的 `jobs/`：
 
-- 交易作业（盘前早报 / IC 监控 / IC 周报）仍在旧项目
-  `D:\PythonProject\MainToy\scheduler\registry.py`，由 MainToy 的调度进程跑。
-- 本仓库的调度器目前不启动；要看作业状态照旧用 MainToy 那套
-  （`python -m scheduler status` / 钉钉里发 `/jobs` 会走本仓库的空清单）。
-- 设计取舍、调度语义（occurrence / 窗口 / 重试 / misfire）见
-  `D:\PythonProject\MainToy\docs\scheduler.md`。
-- ⚠ 两边都用 `~/.dingtalk-bot/scheduler.db` 会撞车；本仓库的
-  `scheduler/config.py` 已把互斥体名改成 `Local\dingtalk_agent_scheduler`，
-  真要启动它请设 `SCHEDULER_HOME` 指到独立目录。
+| 作业 | 时间 | 脚本 |
+|---|---|---|
+| `premarket` 盘前早报 | 每天 08:00（补跑 180 分钟） | `jobs/premarket_push.py` |
+| `ic_monitor` IC 信号监控 | 周一~周五 08:50（补跑 70 分钟） | `jobs/ic_signal_monitor.py` |
+| `ic_weekly` IC 周报 | 周一 09:05（补跑 100 分钟） | `jobs/ic_weekly_report.py` |
+
+- 看作业状态：`python -m scheduler status`（在仓库根跑），钉钉里发 `/jobs` 看同一份。
+- 手动补跑：`python -m scheduler run ic_monitor`（别名 `/ic` 也行）。
+- 设计取舍、调度语义（occurrence / 窗口 / 重试 / misfire）见 `docs/scheduler.md`。
+- 运行期状态统一在 `~/.dingtalk-bot/`：`scheduler.db`、`scheduler.pid`、
+  `logs/scheduler.log`、`logs/jobs/<作业>.log`。
+- 单实例互斥体 `Local\dingtalk_agent_scheduler`：进程崩了内核自动释放。
 
 ---
 
@@ -233,19 +241,24 @@
 | 2026-10-19 | 停机三时点告知 + 协同重启 + 重启找回 + 单实例互斥 | `bot_presence.py`、`bot_restart.py`、`inflight.json` |
 | 2026-10-19 | 出字节奏回归"匀速不加速"，状态行 1 秒一跳 | `.env` `DINGTALK_CARD_PACE_*` |
 | 2026-10-20 | 流式改为**可读性优先**：`TAIL_WINDOW=0` 推全量正文 | `.env` |
-| 2026-10-20 | **抽成本独立仓库 `dingtalk-agent`**（范围：交互机器人），交易作业留在 MainToy | 全仓库 |
+| 2026-10-20 | **抽成本独立仓库 `dingtalk-agent`**（范围：交互机器人） | 全仓库 |
+| 2026-10-20 | **定时作业也搬进来**：`premarket` / `ic_monitor` / `ic_weekly` 三个脚本 + `market_chart` + `akshare_helper`，调度器切到本仓库跑 | `jobs/`、`scheduler/registry.py` |
 
 ---
 
 ## 九、迁移说明（从 MainToy 抽出来的那一次）
 
 **搬过来的**：`bot/listen.py`（原 `finanCalc/listen_up_dingtalk_v3.py`）、
-`tools/` 里 11 个机器人相关模块、`datalayer/` 5 个数据层模块（原在 `finanCalc/`
-与 `trade/`）、`scheduler/` 骨架、`.opencode-bot/` 的规则与配置。
+`tools/` 里 12 个机器人相关模块（含 `market_chart.py`）、`datalayer/` 6 个数据层模块
+（原在 `finanCalc/`、`trade/`、`finanPredict/src/utils/`）、`scheduler/` 本体
++ 作业注册表、**`jobs/` 三个定时作业**、`.opencode-bot/` 的规则与配置。
 
-**没搬的（仍在 MainToy）**：三个交易作业（`ic_signal_monitor.py`、
-`ic_weekly_report.py`、`premarket_push.py`）、`market_chart.py`（图表只给早报用）、
-`autorun/`、`trade/` 的其余部分、天勤账户配置。
+**没搬的（仍在 MainToy）**：`autorun/`、`trade/` 的其余部分、策略回测脚本
+（`backtest_*.py`）、天勤账户配置。
+
+> 回测脚本仍要 `from utils.akshare_helper import fetch_qvix`，所以
+> `MainToy/finanPredict/src/utils/akshare_helper.py` **保留在原地**；
+> 本仓库 `datalayer/akshare_helper.py` 是同一份代码的副本。
 
 **为抽出做的改动**（都是路径类，逻辑零改动）：
 
@@ -257,10 +270,21 @@
 4. `report_news_data` 里硬编码的金十缓存绝对路径改成相对仓库根。
 5. `baostock_daily` 的 `sys.path` 从 `../trade` 改成自身目录（数据层同级平铺）。
 6. `.opencode-bot/opencode.json` 的 MCP 路径指到新仓库。
-7. `scheduler/registry.py` 的 `JOBS` 清空并注明作业去处。
-8. 看门狗脚本 `dingtalk-bot-autostart.ps1` 的 bot 路径指向新仓库（scheduler 仍指 MainToy）。
+7. `scheduler/registry.py` 的 `JOBS` 填上三个作业（时间点/窗口/重试/别名与老仓库一致）。
+8. 看门狗脚本 `dingtalk-bot-autostart.ps1` 的 bot 和 scheduler 路径都指向新仓库。
+9. 三个作业脚本从 MainToy 搬进 `jobs/`，路径依赖改写：
+   `utils.akshare_helper` → `datalayer.akshare_helper`、
+   `notifycation` → `tools.notifycation`、
+   `sys.path` 里写死的 `MainToy/finanPredict[\\src]` 改成仓库根。
+10. 作业的运行期产物改放 `var/`（IC 信号/状态/周报 PNG），
+    早报的会话文件与机器人统一到 `bot/bridge_data/`
+    （**顺手修掉一个老 bug**：原来脚本写 `finanCalc/bridge_data`、
+    机器人读 `bot/bridge_data`，机器人启动时的「清空盘前会话」一直没生效）。
+11. 迁移时把 `ic_latest_signal.json` / `ic_signal_history.json` /
+    `premarket_last_sent.json` 一并搬过来，去重状态没断。
 
-**回退**：旧文件在 MainToy 里**没有删**，改回旧路径即可复跑（见第十一节）。
+**回退**：旧文件在 MainToy 里**没有删**，改回旧路径即可复跑
+（见第十二节「已知风险 / 待办」第 4 条）。
 
 ---
 
@@ -275,16 +299,19 @@
 | 改卡片出字节奏/节流 | `.env` 的 `DINGTALK_CARD_PACE_*` / `_STATUS_REFRESH` / `_MIN_INTERVAL` |
 | 加一条聊天指令 | `bot/listen.py` 的 `process()`（放在交给 agent 之前） |
 | 改权限/自动代答策略 | 桥接层 `AUTO_ALLOW_PERMISSIONS`、`handle_pending_gates` |
-| 加定时作业 | `scheduler/registry.py` 的 `JOBS` + 一个"跑完就退"的脚本 |
+| 加定时作业 | `scheduler/registry.py` 的 `JOBS` + `jobs/` 里一个"跑完就退"的脚本 |
+| 改早报内容/时机 | `jobs/premarket_push.py`（时机在 `registry.py` 的 `at` / `window_min`） |
+| 改 IC 信号阈值/图表 | `jobs/ic_signal_monitor.py`、`jobs/ic_weekly_report.py` |
 | 改重启/恢复行为 | `tools/bot_restart.py`、`InflightRegistry`、`recover_inflight` |
 | 换模型/改候选 | `.env` 与桥接层 `DEFAULT_MODEL` / `FALLBACK_MODEL` / `MODEL_CHOICES` |
 
 常用核查：
 
 ```powershell
-python -m compileall -q bot tools datalayer scheduler
+python -m compileall -q bot tools datalayer jobs scheduler
 python tools\bot_presence.py --status       # 在线状态
 python tools\bot_restart.py --status        # 有没有挂起的重启
+python -m scheduler status                  # 作业今天跑没跑
 Get-Content bot\logs\dingtalk_v3.log -Tail 50
 Get-Content ~\.dingtalk-bot\autostart.log -Tail 30
 ```
@@ -327,8 +354,8 @@ Get-Content ~\.dingtalk-bot\autostart.log -Tail 30
    建议照上游做法改成"按码点分 block → 多卡补发 → 才降级"。
 2. **`ROTATE_TURNS=0`**：会话永不轮换，上下文会一直涨到模型上限才由 `/compact`
    人工救。要么打开轮换，要么接近上限时自动 compact。
-3. **调度器分叉**：作业在 MainToy、骨架在这里，`/jobs` 在本仓库看到的是空清单。
-   要么把作业搬过来，要么把骨架删掉只保留文档说明。
-4. **`.env` 明文**：钉钉密钥、模型 key、金十 cookie 都是明文，随目录走；已 gitignore。
-5. **旧路径仍在跑**：MainToy 里的 `finanCalc/listen_up_dingtalk_v3.py` 等文件
-   没有删，只在看门狗层面切到了新仓库。跑通一段时间后再清理，别急着删。
+3. **`.env` 明文**：钉钉密钥、模型 key、金十 cookie 都是明文，随目录走；已 gitignore。
+4. **旧路径仍在跑**：MainToy 里的 `finanCalc/listen_up_dingtalk_v3.py`、
+   `finanCalc/ic_signal_monitor.py`、`finanCalc/ic_weekly_report.py`、
+   `tools/premarket_push.py`、`scheduler/` 等旧文件没有删，只在看门狗层面切到了新仓库。
+   跑通一段时间后再清理，别急着删。

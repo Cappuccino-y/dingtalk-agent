@@ -14,6 +14,20 @@ class OpenAICompatibleClient:
         base_url = base_url or os.getenv("LLM_BASE_URL")
         self.client = OpenAI(api_key=api_key, base_url=base_url)
 
+    @classmethod
+    def for_job(cls, prefix: str = "EVOLVE"):
+        """按前缀读环境变量建客户端，缺配置就退回默认的 LLM_*。
+
+        EVOLVE_LLM_BASE_URL / EVOLVE_LLM_MODEL / EVOLVE_LLM_API_KEY
+        （API key 不给就用 MINIMAX_API_KEY，再不给就用 LLM_API_KEY）
+        """
+        model = os.getenv(f"{prefix}_LLM_MODEL")
+        base = os.getenv(f"{prefix}_LLM_BASE_URL")
+        key = os.getenv(f"{prefix}_LLM_API_KEY") or os.getenv("MINIMAX_API_KEY")
+        if not (model and base):
+            return cls()
+        return cls(model=model, api_key=key, base_url=base)
+
     def generate(self, prompt: str, system_prompt: str = None) -> str:
         """单轮对话：传入 prompt 和可选的 system_prompt，返回模型回复。"""
         print("正在调用大语言模型（单轮）...")
