@@ -32,3 +32,20 @@ source.agentIds: evolve, user-approved
 动作: 按统一架构重构，避免每个工具单独设置常驻守护进程；jobs 除定时执行外，也要支持用户手动触发。
 适用范围: dingtalk-agent 的 Bot、scheduler、工具和作业执行体系。
 
+---
+memoryId: mem_488f97b4_77294
+timestamp: 2026-10-20T06:21:34Z
+scope: project:dingtalk-agent
+category: decision
+title: DingTalk Agent 是独立项目和独立 Git 仓库
+tags: [evolve]
+confidence: high
+trust: self
+source.messageIds: card:oc-88a1b0ef9f114f118367, session:ses_ea877a107ffe1IKS2gjnjD5Jgt, proposal:prop_20261020-140406_cbd8
+source.agentIds: evolve, user-approved
+---
+
+触发条件: 维护代码、编写架构文档、配置依赖或说明部署边界时。
+动作: 将 DingTalk Agent 作为独立项目和独立 Git 仓库维护，不将其描述或依赖为 MainToy、FindCap 下的子模块或原有同一项目。
+适用范围: dingtalk-agent 的代码、文档、依赖、部署与仓库引用。
+
