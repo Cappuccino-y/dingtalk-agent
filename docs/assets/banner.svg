@@ -1,61 +1,104 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="360" viewBox="0 0 1100 360" role="img" aria-label="dingtalk-agent">
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420" role="img" aria-label="dingtalk-agent — 钉钉私聊机器人 · 会自我改进的私人助理">
   <title>dingtalk-agent</title>
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#0a1020"/>
-      <stop offset="52%" stop-color="#111a2c"/>
-      <stop offset="100%" stop-color="#0c1322"/>
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="55%" stop-color="#f7f9fd"/>
+      <stop offset="100%" stop-color="#eef2fa"/>
     </linearGradient>
-    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0%" stop-color="#5b9bf5"/>
-      <stop offset="100%" stop-color="#3ecfd6"/>
-    </linearGradient>
-    <radialGradient id="glow" cx="0.76" cy="0.24" r="0.62">
-      <stop offset="0%" stop-color="#2f6fd8" stop-opacity="0.30"/>
-      <stop offset="100%" stop-color="#2f6fd8" stop-opacity="0"/>
+    <radialGradient id="blobA" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0%" stop-color="#6366f1" stop-opacity="0.20"/>
+      <stop offset="100%" stop-color="#6366f1" stop-opacity="0"/>
     </radialGradient>
-    <pattern id="grid" width="30" height="30" patternUnits="userSpaceOnUse">
-      <path d="M30 0 L0 0 0 30" fill="none" stroke="#ffffff" stroke-opacity="0.04" stroke-width="1"/>
-    </pattern>
-    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-      <path d="M0 1 L9 5 L0 9 z" fill="#4a5b78"/>
-    </marker>
-    <marker id="arrowAccent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-      <path d="M0 1 L9 5 L0 9 z" fill="#3ecfd6"/>
-    </marker>
+    <radialGradient id="blobB" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0%" stop-color="#22d3ee" stop-opacity="0.22"/>
+      <stop offset="100%" stop-color="#22d3ee" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="blobC" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0%" stop-color="#a78bfa" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#a78bfa" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#4f46e5"/>
+      <stop offset="100%" stop-color="#06b6d4"/>
+    </linearGradient>
+    <linearGradient id="cardHead" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#6366f1"/>
+      <stop offset="100%" stop-color="#0ea5e9"/>
+    </linearGradient>
+    <filter id="soft" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="16" stdDeviation="20" flood-color="#1e293b" flood-opacity="0.13"/>
+    </filter>
+    <filter id="soft2" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="10" stdDeviation="16" flood-color="#6366f1" flood-opacity="0.10"/>
+    </filter>
   </defs>
 
-  <rect width="1100" height="360" fill="url(#bg)"/>
-  <rect width="1100" height="360" fill="url(#grid)"/>
-  <rect width="1100" height="360" fill="url(#glow)"/>
+  <!-- 背景 -->
+  <rect width="1200" height="420" fill="url(#bg)"/>
+  <ellipse cx="180" cy="90" rx="380" ry="250" fill="url(#blobA)"/>
+  <ellipse cx="1060" cy="330" rx="420" ry="260" fill="url(#blobB)"/>
+  <ellipse cx="640" cy="410" rx="420" ry="220" fill="url(#blobC)"/>
 
-  <!-- 标题区 -->
-  <text x="64" y="146" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Arial,'PingFang SC','Microsoft YaHei',sans-serif"
-        font-size="60" font-weight="700" fill="#f0f6fc" letter-spacing="-1.2">dingtalk-agent</text>
-  <rect x="66" y="172" width="76" height="3.5" rx="1.75" fill="url(#accent)"/>
-  <text x="64" y="222" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif"
-        font-size="21" fill="#a9bad0">钉钉私聊机器人 · 会自我改进的私人助理</text>
-  <text x="64" y="258" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,sans-serif"
-        font-size="15" fill="#66789a">DingTalk bot · OpenCode agent · self-improving, human-approved</text>
+  <!-- 左侧文字 -->
+  <g font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif">
+    <text x="74" y="168" font-size="56" font-weight="700" fill="#0f172a" letter-spacing="-1.6">dingtalk-agent</text>
+    <rect x="76" y="192" width="76" height="4" rx="2" fill="url(#accent)"/>
+    <text x="74" y="244" font-size="21" fill="#334155" font-weight="500">钉钉私聊机器人 · 会自我改进的私人助理</text>
+    <text x="74" y="280" font-size="15" fill="#64748b">DingTalk bot · OpenCode agent · self-improving, human-approved</text>
 
-  <!-- 闭环示意 -->
-  <g font-family="ui-sans-serif,-apple-system,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif" font-size="15" text-anchor="middle">
-    <rect x="616" y="120" width="120" height="46" rx="23" fill="#152036" stroke="#2a3a5c" stroke-width="1.2"/>
-    <text x="676" y="149" fill="#c6d3e5">对话</text>
+    <!-- 三个要点 -->
+    <g font-size="13.5" fill="#475569">
+      <circle cx="80" cy="326" r="3.5" fill="#6366f1"/>
+      <text x="94" y="331">提案由零工具的 LLM 生成，改不了记忆库</text>
+      <circle cx="80" cy="352" r="3.5" fill="#06b6d4"/>
+      <text x="94" y="357">落地是确定性代码，经你批准才写文件</text>
+      <circle cx="80" cy="378" r="3.5" fill="#a78bfa"/>
+      <text x="94" y="383">每次落地一条 git commit，可单独撤销</text>
+    </g>
+  </g>
 
-    <line x1="740" y1="143" x2="778" y2="143" stroke="#4a5b78" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <!-- 右侧：审批卡 mockup -->
+  <g>
+    <!-- 后面一张卡片，制造纵深 -->
+    <g filter="url(#soft2)">
+      <rect x="750" y="92" width="352" height="292" rx="20" fill="#ffffff" stroke="#e6ecf6" stroke-width="1.2"/>
+    </g>
 
-    <rect x="782" y="120" width="120" height="46" rx="23" fill="#152036" stroke="#2a3a5c" stroke-width="1.2"/>
-    <text x="842" y="149" fill="#c6d3e5">提案</text>
+    <!-- 主卡片 -->
+    <g filter="url(#soft)">
+      <rect x="768" y="70" width="352" height="292" rx="20" fill="#ffffff"/>
+      <rect x="768" y="70" width="352" height="60" rx="20" fill="url(#cardHead)"/>
+      <rect x="768" y="104" width="352" height="26" fill="url(#cardHead)"/>
+    </g>
 
-    <line x1="906" y1="143" x2="944" y2="143" stroke="#4a5b78" stroke-width="1.6" marker-end="url(#arrow)"/>
+    <!-- 卡片头 -->
+    <g font-family="ui-sans-serif,-apple-system,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif">
+      <rect x="788" y="88" width="24" height="24" rx="8" fill="#ffffff" opacity="0.22"/>
+      <path d="M795 96.5 h8 a2 2 0 0 1 2 2 v4 a2 2 0 0 1 -2 2 h-4.5 l-3 2.6 v-2.6 h-0.5 a2 2 0 0 1 -2 -2 v-4 a2 2 0 0 1 2 -2 z"
+            fill="#ffffff" opacity="0.95"/>
+      <text x="822" y="106" font-size="15" font-weight="600" fill="#ffffff">改进提案</text>
+      <rect x="1030" y="88" width="72" height="24" rx="12" fill="#ffffff" opacity="0.24"/>
+      <text x="1066" y="104" font-size="12" fill="#ffffff" text-anchor="middle">待审批</text>
+    </g>
 
-    <rect x="948" y="120" width="120" height="46" rx="23" fill="#10262e" stroke="#3ecfd6" stroke-width="1.4"/>
-    <text x="1008" y="149" fill="#8fe6ea">记忆</text>
+    <!-- 正文占位 -->
+    <rect x="792" y="156" width="212" height="9" rx="4.5" fill="#e7ecf4"/>
+    <rect x="792" y="180" width="272" height="9" rx="4.5" fill="#eef2f7"/>
+    <rect x="792" y="204" width="150" height="9" rx="4.5" fill="#eef2f7"/>
 
-    <path d="M1008 166 L1008 198 Q1008 210 996 210 L692 210 Q680 210 680 198 L680 168"
-          fill="none" stroke="#3ecfd6" stroke-opacity="0.75" stroke-width="1.6"
-          stroke-dasharray="5 4" marker-end="url(#arrowAccent)"/>
-    <text x="844" y="234" font-size="13.5" fill="#5f7a86">人工批准后落地，回写记忆</text>
+    <!-- 选项 -->
+    <g font-family="ui-sans-serif,-apple-system,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif" font-size="13.5">
+      <text x="792" y="242" font-size="12.5" fill="#94a3b8">你的决定</text>
+      <rect x="792" y="254" width="94" height="34" rx="10" fill="#4f46e5"/>
+      <text x="839" y="276" fill="#ffffff" text-anchor="middle">批准</text>
+      <rect x="898" y="254" width="94" height="34" rx="10" fill="#ffffff" stroke="#dbe2ee" stroke-width="1.2"/>
+      <text x="945" y="276" fill="#64748b" text-anchor="middle">驳回</text>
+      <rect x="1004" y="254" width="94" height="34" rx="10" fill="#ffffff" stroke="#dbe2ee" stroke-width="1.2"/>
+      <text x="1051" y="276" fill="#64748b" text-anchor="middle">稍后再说</text>
+
+      <rect x="792" y="302" width="134" height="36" rx="10" fill="#4f46e5"/>
+      <text x="859" y="325" fill="#ffffff" font-size="14" text-anchor="middle">提交决定</text>
+    </g>
   </g>
 </svg>
