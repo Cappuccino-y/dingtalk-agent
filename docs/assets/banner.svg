@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="360" viewBox="0 0 1100 360" role="img" aria-label="dingtalk-agent">
+  <title>dingtalk-agent</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0a1020"/>
+      <stop offset="52%" stop-color="#111a2c"/>
+      <stop offset="100%" stop-color="#0c1322"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#5b9bf5"/>
+      <stop offset="100%" stop-color="#3ecfd6"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.76" cy="0.24" r="0.62">
+      <stop offset="0%" stop-color="#2f6fd8" stop-opacity="0.30"/>
+      <stop offset="100%" stop-color="#2f6fd8" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="30" height="30" patternUnits="userSpaceOnUse">
+      <path d="M30 0 L0 0 0 30" fill="none" stroke="#ffffff" stroke-opacity="0.04" stroke-width="1"/>
+    </pattern>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 1 L9 5 L0 9 z" fill="#4a5b78"/>
+    </marker>
+    <marker id="arrowAccent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 1 L9 5 L0 9 z" fill="#3ecfd6"/>
+    </marker>
+  </defs>
+
+  <rect width="1100" height="360" fill="url(#bg)"/>
+  <rect width="1100" height="360" fill="url(#grid)"/>
+  <rect width="1100" height="360" fill="url(#glow)"/>
+
+  <!-- 标题区 -->
+  <text x="64" y="146" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Arial,'PingFang SC','Microsoft YaHei',sans-serif"
+        font-size="60" font-weight="700" fill="#f0f6fc" letter-spacing="-1.2">dingtalk-agent</text>
+  <rect x="66" y="172" width="76" height="3.5" rx="1.75" fill="url(#accent)"/>
+  <text x="64" y="222" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif"
+        font-size="21" fill="#a9bad0">钉钉私聊机器人 · 会自我改进的私人助理</text>
+  <text x="64" y="258" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,sans-serif"
+        font-size="15" fill="#66789a">DingTalk bot · OpenCode agent · self-improving, human-approved</text>
+
+  <!-- 闭环示意 -->
+  <g font-family="ui-sans-serif,-apple-system,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif" font-size="15" text-anchor="middle">
+    <rect x="616" y="120" width="120" height="46" rx="23" fill="#152036" stroke="#2a3a5c" stroke-width="1.2"/>
+    <text x="676" y="149" fill="#c6d3e5">对话</text>
+
+    <line x1="740" y1="143" x2="778" y2="143" stroke="#4a5b78" stroke-width="1.6" marker-end="url(#arrow)"/>
+
+    <rect x="782" y="120" width="120" height="46" rx="23" fill="#152036" stroke="#2a3a5c" stroke-width="1.2"/>
+    <text x="842" y="149" fill="#c6d3e5">提案</text>
+
+    <line x1="906" y1="143" x2="944" y2="143" stroke="#4a5b78" stroke-width="1.6" marker-end="url(#arrow)"/>
+
+    <rect x="948" y="120" width="120" height="46" rx="23" fill="#10262e" stroke="#3ecfd6" stroke-width="1.4"/>
+    <text x="1008" y="149" fill="#8fe6ea">记忆</text>
+
+    <path d="M1008 166 L1008 198 Q1008 210 996 210 L692 210 Q680 210 680 198 L680 168"
+          fill="none" stroke="#3ecfd6" stroke-opacity="0.75" stroke-width="1.6"
+          stroke-dasharray="5 4" marker-end="url(#arrowAccent)"/>
+    <text x="844" y="234" font-size="13.5" fill="#5f7a86">人工批准后落地，回写记忆</text>
+  </g>
+</svg>

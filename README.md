@@ -1,79 +1,183 @@
-# dingtalk-agent
+<p align="center">
+  <img src="docs/assets/banner.svg" alt="dingtalk-agent" width="100%">
+</p>
 
-钉钉 ↔ 本机 OpenCode agent 的桥接机器人。手机钉钉发一句话，本机的 OpenCode
-接手（能跑命令、改文件、查资料、看行情），结果以钉钉 AI 卡片流式回显。
+<p align="center">
+  <b>钉钉私聊机器人 · 会自我改进的私人助理</b><br>
+  <sub>DingTalk bot · OpenCode agent · self-improving, human-approved</sub>
+</p>
 
-**这是一个独立仓库**，从 `D:\PythonProject\MainToy` 里抽出来的（详见
-`docs/bot-architecture.md` 的「迁移说明」）。机器人本体、行情 MCP、数据层、
-调度器**以及三个定时作业**（早报 / IC 监控 / IC 周报）现在都在本仓库里。
-交易类脚本、策略回测、天勤账户仍然留在 MainToy，本仓库不持有。
+<p align="center">
+  <img alt="Python" src="https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white">
+  <img alt="Platform" src="https://img.shields.io/badge/Platform-Windows-0078D6?style=flat-square&logo=windows&logoColor=white">
+  <img alt="Stars" src="https://img.shields.io/github/stars/Cappuccino-y/dingtalk-agent?style=flat-square&logo=github">
+  <img alt="Last commit" src="https://img.shields.io/github/last-commit/Cappuccino-y/dingtalk-agent?style=flat-square">
+  <img alt="Self improving" src="https://img.shields.io/badge/self--improving-human--approved-3ECFD6?style=flat-square">
+</p>
 
-## 结构
+<p align="center">
+  <a href="#能力">能力</a> ·
+  <a href="#自我改进闭环">自我改进闭环</a> ·
+  <a href="#快速开始">快速开始</a> ·
+  <a href="#架构">架构</a> ·
+  <a href="#定时作业">定时作业</a> ·
+  <a href="#文档">文档</a>
+</p>
 
-```
-bot/listen.py            入口：钉钉 Stream 回调、白名单、限速、指令、并发闸门
-tools/opencode_bridge.py 桥接核心：会话/回合/事件流/卡片 v1/重启找回/模型切换
-tools/card_v2.py         卡片 v2：公共模板 + 卡片 OpenAPI
-tools/market_mcp.py      行情 MCP server（stdio）：quote/overseas/wave/tech/news
-tools/wave_engine.py     道氏 + 艾略特波浪的确定性计算
-tools/market_data.py     行情抓取（新浪）
-tools/market_chart.py    指数点位图（中证1000 支撑/压力 + 均线）
-tools/dingtalk_push.py   主动推送文本/图片/文件
-tools/notifycation.py    钉钉 webhook / access_token
-tools/bot_presence.py    停机三时点告知（重启前 / 掉线 / 已恢复）
-tools/bot_restart.py     协同重启（只写标记，不 kill 自己）
-datalayer/               baostock_daily / report_news_data / eastmoney_patch /
-                         trade_data_fetcher / akshare_multi_period / akshare_helper
-jobs/premarket_push.py   盘前早报（scheduler 的 premarket 作业）
-jobs/ic_signal_monitor.py IC 期货多信号监控（scheduler 的 ic_monitor 作业）
-jobs/ic_weekly_report.py  IC 抄底信号周报（scheduler 的 ic_weekly 作业）
-scheduler/               调度器本体 + 作业注册表（registry.py 里是权威作业清单）
-var/                     运行期产物（IC 信号/状态/周报 PNG，.gitignore 已忽略）
-.opencode-bot/           机器人专属 Location：AGENTS.md（行为规则）+ opencode.json
-docs/bot-architecture.md 架构与维护手册（**改代码前先读**）
-docs/scheduler.md        调度器语义与日常操作
-```
+<br>
 
-## 起来一次
+> [!NOTE]
+> 这是一个**自用项目**：跑在个人 Windows 机器上，通过钉钉 Stream 长连接与用户私聊。
+> 仓库里的 `jobs/` 是我自己的定时报告作业，与机器人本体解耦，可以整目录替换。
 
-```powershell
-# 1) 配置（首次）
-Copy-Item .env.example .env   # 然后填 APP_KEY / APP_SECRET / 模型 key 等
+## 能力
 
-# 2) 前台跑（调试用；会和正式实例抢同一个钉钉连接，正式实例在跑时别开）
-D:\Scoop\persist\anaconda3\App\envs\MainToy\python.exe bot\listen.py
+- 💬 **钉钉私聊机器人** — Stream 长连接接入，卡片 v2 支持 Markdown、表单、图片推送
+- 🧠 **OpenCode Agent 驱动** — 复用本机 `opencode serve`，按项目隔离会话、工具与上下文
+- 🃏 **全卡片交互** — 问答、重试、停止、审批全部走卡片回调，不做轮询
+- 📈 **行情 MCP 工具集** — `quote` / `overseas` / `wave` / `tech` / `news` 五类工具，附指标图与证据背书
+- ⏰ **内置调度器** — 四个定时作业，带补跑窗口，支持手动触发
+- 🧬 **记忆层** — append-only、三级信任分级、写入闸门、有界上限
+- 🔁 **自我改进闭环** — 每日扫描产出提案，**经钉钉审批后才落地**
+- 🔍 **全链路可审计** — 每次落地一条独立 git commit，可单独 revert
 
-# 3) 正式方式：交给看门狗
-#    计划任务 dingtalk-bot-watchdog 每分钟跑一次
-#    C:\Users\yydyy77\bin\dingtalk-bot-autostart.ps1
-```
+## 自我改进闭环
 
-同一个 `APP_KEY` 只允许一条 Stream 连接，所以机器人有命名互斥体
-（`Local\dingtalk_bot_v3`）防重复启动。
+这是本项目区别于普通「套壳聊天机器人」的部分：它会从自己的对话里学到东西，
+然后**改自己的记忆**——但改之前必须过你这一关。
 
-## 改完代码怎么生效
-
-```powershell
-python D:\PythonProject\dingtalk-agent\tools\bot_restart.py "改了 xxx"
-```
-
-**不要** `Stop-Process` / `taskkill` 去杀监听进程——那正是正在渲染你这条回复卡片的
-进程，杀了会让钉钉那边永远停在「正在思考」。上面这条命令只写一个重启标记，
-监听进程会在当前这一轮跑完、卡片收尾之后自行退出，看门狗再拉起（约 10 秒）。
-
-## 验证
-
-```powershell
-& D:\Scoop\persist\anaconda3\App\envs\MainToy\python.exe -m compileall -q bot tools datalayer scheduler
-Get-Content bot\logs\dingtalk_v3.log -Tail 50
-Get-Content bot\logs\v3_stderr.log -Tail 30
-python tools\bot_presence.py --status
-python tools\bot_restart.py --status
+```mermaid
+%%{init: {'theme':'base','themeVariables':{'primaryColor':'#eaf2ff','primaryTextColor':'#0d1117','primaryBorderColor':'#4c8eda','lineColor':'#6e7781','secondaryColor':'#f6f8fa','tertiaryColor':'#ffffff','fontFamily':'ui-sans-serif, system-ui, sans-serif'}}}%%
+flowchart LR
+  J["交互流水<br/>journal.md"] --> E["每日扫描<br/>evolve.py"]
+  E --> L["LLM 提案<br/>零工具"]
+  L --> C["钉钉审批卡"]
+  C -->|批准| A["确定性落地<br/>apply_proposal.py"]
+  C -->|驳回| R["归档<br/>下次避开"]
+  A --> M["记忆库<br/>+ git commit"]
+  M -.回写.-> J
 ```
 
-## 注意
+三条硬约束：
 
-- `.env` 里有钉钉密钥和模型 key，**不进 git**。
-- 行情数据依赖网络（新浪 / 东财 / 金十 / baostock），偶发超时属于正常，工具内部有降级。
-- 卡片 v2 的硬限制（block 只认 0-3、单 block 约 3000 字、进度块必须单行）
-  在 `docs/bot-architecture.md` 第四节，改卡片前务必先看。
+| 约束 | 实现 |
+|---|---|
+| **评估器住在循环改不到的地方** | 提案者直连 LLM，**没有任何工具**，物理上改不了记忆库 |
+| **提案权 ≠ 变更权** | 提案落 `memory/proposals/`，你点「批准」才写文件 |
+| **落地是确定性代码** | `apply_proposal.py` 只做白名单校验 + 追加 + git commit，不经 LLM |
+
+配套护栏：每 scope 记忆条数上限、pinned 条目不可被自动取代、
+同一句用户原话不重复入库、每次落地记录验收快照。细节见
+[docs/self-improvement.md](docs/self-improvement.md)。
+
+## 快速开始
+
+前置条件：Python 3.10+、一个钉钉机器人（`APP_KEY` / `APP_SECRET`）、
+本机已运行 `opencode serve`。
+
+```bash
+# 1) 配置
+cp .env.example .env    # 填 APP_KEY / APP_SECRET / 模型 key
+
+# 2) 起机器人（长连接，Stream 模式）
+python bot/listen.py
+
+# 3) 起调度器（定时作业）
+python -m scheduler serve
+```
+
+机器人起来后，直接在钉钉私聊里发消息即可。重启用：
+
+```bash
+python tools/bot_restart.py "重启原因"   # 会话不丢，带状态提示
+```
+
+<details>
+<summary>环境变量</summary>
+
+| 变量 | 用途 |
+|---|---|
+| `APP_KEY` / `APP_SECRET` | 钉钉机器人凭据 |
+| `EVOLVE_LLM_BASE_URL` / `EVOLVE_LLM_MODEL` | 改进扫描用的模型通道（与主模型解耦） |
+| `EVOLVE_LLM_FALLBACK_MODEL` | 主模型失败时自动降级 |
+| `LLM_API_KEY` / `LLM_MODEL_ID` / `LLM_BASE_URL` | Agent 主模型通道 |
+
+`.env` **不入 git**。所有密钥只从环境变量读。
+
+</details>
+
+## 架构
+
+```mermaid
+%%{init: {'theme':'base','themeVariables':{'primaryColor':'#eaf2ff','primaryTextColor':'#0d1117','primaryBorderColor':'#4c8eda','lineColor':'#6e7781','secondaryColor':'#f6f8fa','tertiaryColor':'#ffffff','fontFamily':'ui-sans-serif, system-ui, sans-serif'}}}%%
+flowchart TB
+  U["用户（钉钉私聊）"] --> B["bot/listen.py<br/>Stream 长连接"]
+  B --> BR["tools/opencode_bridge.py<br/>会话 · 卡片 · 路由"]
+  BR --> O["opencode serve<br/>按项目隔离"]
+  O --> MCP["tools/market_mcp.py<br/>行情工具"]
+  O --> MEM["memory/<br/>记忆层"]
+  SCH["scheduler<br/>定时作业"] --> JOBS["jobs/"]
+  SCH --> EV["tools/evolve.py<br/>改进扫描"]
+  EV --> CARD["审批卡 → 钉钉"]
+  CARD --> AP["tools/apply_proposal.py"]
+  AP --> MEM
+```
+
+<details>
+<summary>目录结构</summary>
+
+```
+bot/         钉钉 Stream 接入、卡片 v1/v2、推送、在线状态
+tools/       Agent 桥接、行情 MCP、记忆层、自我改进、评估器
+datalayer/   行情数据源封装（baostock / akshare / 东财 / 同花顺）
+jobs/        定时业务作业（盘前早报 / IC 信号 / IC 周报）
+scheduler/   调度器守护进程 + 作业注册表
+memory/      记忆层：global / project / journal / proposals
+var/         运行期产物（IC 信号、状态图、PNG），已 gitignore
+.opencode-bot/ 机器人专用 Agent 配置（AGENTS.md + opencode.json）
+docs/        架构、调度、自我改进的设计文档
+```
+
+</details>
+
+## 定时作业
+
+| 作业 | 触发 | 说明 |
+|---|---|---|
+| `evolve` | 每天 03:00 | 知识与行为改进扫描，产出提案推审批卡 |
+| `premarket` | 每天 08:00 | 盘前早报 |
+| `ic_monitor` | 周一~周五 08:50 | IC 信号监控 |
+| `ic_weekly` | 周一 09:05 | IC 周报 |
+
+```bash
+python -m scheduler list          # 作业清单与下次触发时间
+python -m scheduler run evolve    # 手动补跑一次
+```
+
+作业定义在 `scheduler/registry.py`，所有作业都带**补跑窗口**（错过触发时间仍会在
+窗口内执行），支持手动 `/run <作业>`。
+
+## 文档
+
+| 文档 | 内容 |
+|---|---|
+| [docs/bot-architecture.md](docs/bot-architecture.md) | 机器人整体架构与会话生命周期 |
+| [docs/scheduler.md](docs/scheduler.md) | 调度语义、作业注册、补跑策略 |
+| [docs/self-improvement.md](docs/self-improvement.md) | 自我改进闭环的设计、护栏与已知限制 |
+| [memory/README.md](memory/README.md) | 记忆层速查（信任分级、闸门、有界规则） |
+
+## 路线图
+
+- [x] 钉钉私聊 + 卡片 v2 全交互
+- [x] OpenCode Agent 接入与项目隔离
+- [x] 定时作业与补跑窗口
+- [x] 记忆层：append-only + 信任分级 + 写入闸门
+- [x] 自我改进闭环：每日扫描 → 钉钉审批 → 确定性落地
+- [x] 变更验收：held-out 判例上的 A/B 对照
+- [ ] 记忆库语义检索（等分层治理跑顺）
+- [ ] 跨会话去重（当前靠证据逐字比对 + 人工确认）
+- [ ] 更多行情数据源
+
+---
+
+<sub>个人项目，仅供学习参考。仓库不含任何密钥，`.env` 已在 <code>.gitignore</code> 中。</sub>
