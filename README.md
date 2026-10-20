@@ -1,10 +1,5 @@
 <p align="center">
-  <img src="docs/assets/banner.svg" alt="dingtalk-agent" width="100%">
-</p>
-
-<p align="center">
-  <b>钉钉私聊机器人 · 会自我改进的私人助理</b><br>
-  <sub>DingTalk bot · OpenCode agent · self-improving, human-approved</sub>
+  <img src="docs/assets/banner.svg" alt="dingtalk-agent — 钉钉私聊机器人 · 会自我改进的私人助理" width="100%">
 </p>
 
 <p align="center">
