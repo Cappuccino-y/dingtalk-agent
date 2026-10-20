@@ -369,6 +369,8 @@ def main() -> int:
         print(json.dumps(props, ensure_ascii=False, indent=2))
         return 0
 
+    saved: list[str] = []
+    skipped = 0
     for p in props:
         # ---- 去重闸门（确定性，在推卡之前就拦掉）----
         # 同一个坑提两次会生成两条记忆，这是记忆库退化的主因。
@@ -379,6 +381,7 @@ def main() -> int:
             print(f"[evolve] 跳过（{why}）")
             ms.append_journal("evolve_skip", f"跳过重复提案: {p.get('title', '')[:60]}",
                               reason=why)
+            skipped += 1
             continue
         if not sup:
             probe = f"{p.get('title', '')} {p.get('body', '')}"
@@ -389,6 +392,7 @@ def main() -> int:
                 print(f"[evolve] 跳过（与 [{e['memoryId']}] {s:.2f} 重合）")
                 ms.append_journal("evolve_skip", f"跳过近重复提案: {p.get('title', '')[:60]}",
                                   similar=e["memoryId"], score=f"{s:.2f}")
+                skipped += 1
                 continue
         # 上限预检：满了就别推卡了，推了也批不了
         actives = ms.count_active(scope)
@@ -396,6 +400,7 @@ def main() -> int:
             print(f"[evolve] 跳过（{scope} 已达上限 {ms.MAX_LEARNED_RULES}）")
             ms.append_journal("evolve_skip", f"跳过提案（已达上限）: {p.get('title', '')[:60]}",
                               scope=scope, active=actives)
+            skipped += 1
             continue
 
         pid = ms.save_proposal({
@@ -413,12 +418,17 @@ def main() -> int:
             "proposed_by": model,      # 哪个模型提的（provenance）
         })
         p["id"] = pid
+        saved.append(pid)
         print(f"[evolve] 提案已存 {pid}: {p.get('title', '')[:50]}")
         if not args.no_push:
             push_approval_card(pid, p)
 
-    ms.append_journal("evolve", f"扫描完成，提出 {len(props)} 条提案，等待用户审批",
-                      proposals=",".join(p.get("id", "") for p in props))
+    if saved:
+        ms.append_journal("evolve", f"扫描完成，提出 {len(saved)} 条提案，等待用户审批",
+                          proposals=",".join(saved), skipped=skipped)
+    else:
+        ms.append_journal("evolve", f"扫描完成，{len(props)} 条全部被去重闸门跳过",
+                          skipped=skipped)
     return 0
 
 

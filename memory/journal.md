@@ -520,3 +520,27 @@ IC 监控**已经加进去了**，现在是调度器里的第二个作业：
 - Summary: 扫描完成，提出 3 条提案，等待用户审批
 - proposals: ,,
 
+## 2026-10-20T14:21:32 — proposal_approved
+- Summary: 提案已落地: 新增或封装的 Skill 默认配置为全局可用
+- proposal: prop_20261020-140405_9547
+- memory_id: mem_fe3d8e72_77292
+- scope: global
+- supersedes: -
+- evidence_refs: card:oc-e6fd7cd5565d48788842, session:ses_ea8f58a96ffex5UF00fD83GXIj
+
+## 2026-10-20T14:21:33 — proposal_approved
+- Summary: 提案已落地: Bot 作业采用统一架构并同时支持定时与手动执行
+- proposal: prop_20261020-140406_6652
+- memory_id: mem_25fe8d2e_77293
+- scope: project:dingtalk-agent
+- supersedes: -
+- evidence_refs: card:oc-f33718de48364d5d8602, session:ses_ea8c6454cffeLUw1aLr5o8wBPN
+
+## 2026-10-20T14:21:34 — proposal_approved
+- Summary: 提案已落地: DingTalk Agent 是独立项目和独立 Git 仓库
+- proposal: prop_20261020-140406_cbd8
+- memory_id: mem_488f97b4_77294
+- scope: project:dingtalk-agent
+- supersedes: -
+- evidence_refs: card:oc-88a1b0ef9f114f118367, session:ses_ea877a107ffe1IKS2gjnjD5Jgt
+

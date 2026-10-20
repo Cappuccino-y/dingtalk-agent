@@ -519,14 +519,22 @@ def read_journal(limit: int = 200) -> list[dict]:
     out = []
     for b in blocks[-limit:]:
         lines = b.splitlines()
-        rec = {"ts": lines[0].strip(), "kind": "", "summary": "", "fields": {}}
+        head = lines[0].strip()
+        # 标题行格式：`<时间> — <类型>`，必须拆开，否则 ts 会带上类型
+        ts, kind = head, ""
+        for sep in ("—", " - "):
+            if sep in head:
+                ts, _, kind = head.partition(sep)
+                ts, kind = ts.strip(), kind.strip()
+                break
+        rec = {"ts": ts, "kind": kind, "summary": "", "fields": {}}
         for ln in lines[1:]:
             if ln.startswith("- Summary:"):
                 rec["summary"] = ln[len("- Summary:"):].strip()
             elif ln.startswith("- "):
                 k, _, v = ln[2:].partition(":")
                 rec["fields"][k.strip()] = v.strip()
-        rec["kind"] = rec["fields"].pop("Kind", "") or rec["ts"]
+        rec["kind"] = rec["kind"] or rec["fields"].pop("Kind", "") or "unknown"
         out.append(rec)
     return out
 
