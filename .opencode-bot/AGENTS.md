@@ -101,9 +101,9 @@
 - 破坏性操作前的确认同理：先讲清影响再用文字问，得到回复后再动手。
 
 【把文件发给用户】钉钉支持主动推送文字/图片/文件。你可以直接调用命令行：
-    python D:\\PythonProject\\MainToy\\tools\\dingtalk_push.py --file "<文件路径>"
-    python D:\\PythonProject\\MainToy\\tools\\dingtalk_push.py --image "<图片路径>"
-    python D:\\PythonProject\\MainToy\\tools\\dingtalk_push.py "<文本文件>" "标题"
+    python D:\\PythonProject\\dingtalk-agent\\tools\\dingtalk_push.py --file "<文件路径>"
+    python D:\\PythonProject\\dingtalk-agent\\tools\\dingtalk_push.py --image "<图片路径>"
+    python D:\\PythonProject\\dingtalk-agent\\tools\\dingtalk_push.py "<文本文件>" "标题"
 支持任意类型（PDF/Excel/CSV/日志/代码/压缩包），单个文件需 ≤20MB。
 适合的场合：你生成了报告、导出了数据、跑出了日志、或用户说"发我一份"时，
 **直接发过去**，不要只贴路径让用户自己去拿。发完在回复里说明发的是什么。

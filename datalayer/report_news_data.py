@@ -4,16 +4,17 @@ import json
 import time
 import random
 import logging
+import os
 from datetime import datetime, timedelta, time as dt_time
 import sys
 import pandas as pd
-sys.path.append(r'D:\PythonProject\MainToy')
+
+# 本仓库布局：datalayer/ 与 tools/ 同级，仓库根要进 sys.path 才能 import tools.*
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from tools import llm_client,notifycation
 from baostock_daily import IndexDataFetcher
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-import os
-import json
 
 HISTORY_DIR = "./conversation_history"  # 存放历史文件的目录
 
