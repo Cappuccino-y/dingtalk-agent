@@ -1,0 +1,47 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": ["AGENTS.md"],
+  "mcp": {
+    "servers": {
+      "market": {
+        "type": "local",
+        "command": [
+          "D:\\Scoop\\persist\\anaconda3\\App\\envs\\MainToy\\python.exe",
+          "D:\\PythonProject\\dingtalk-agent\\tools\\market_mcp.py"
+        ],
+        "timeout": {
+          "catalog": 60000,
+          "execution": 300000
+        }
+      }
+    }
+  },
+  "permission": {
+    "edit": "allow",
+    "bash": "allow",
+    "webfetch": "allow"
+  },
+  "permissions": [
+    {
+      "action": "external_directory",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "question",
+      "resource": "*",
+      "effect": "allow"
+    }
+  ],
+  "agents": {
+    "build": {
+      "permissions": [
+        {
+          "action": "question",
+          "resource": "*",
+          "effect": "allow"
+        }
+      ]
+    }
+  }
+}

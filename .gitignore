@@ -1,0 +1,24 @@
+# 运行数据与凭据，不进版本库
+.env
+datalayer/data_cache/
+data_cache/
+.jin10_z3c_cache.json
+bot/bridge_data/
+bot/logs/
+tools/.dingtalk_recipient.json
+conversation_history/
+var/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+Thumbs.db
+desktop.ini
