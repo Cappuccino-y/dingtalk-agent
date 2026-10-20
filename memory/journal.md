@@ -495,3 +495,8 @@ IC 监控**已经加进去了**，现在是调度器里的第二个作业：
 - memory_id: mem_8f40bd96_75263
 - scope: project:dingtalk-agent
 
+## 2026-10-20T13:49:04 — proposal_rejected
+- Summary: 提案被驳回: 测试驳回路径
+- proposal: prop_20261020-134904_5641
+- note: 用户在钉钉审批卡上驳回
+
