@@ -92,27 +92,50 @@ def feedback_stats() -> dict:
 
 
 def memory_stats() -> dict:
-    entries = ms.all_entries()
+    entries = ms.all_active_entries()
     by_cat, by_conf, by_scope, by_trust = {}, {}, {}, {}
     for e in entries:
         by_cat[e["category"]] = by_cat.get(e["category"], 0) + 1
         by_conf[e["confidence"]] = by_conf.get(e["confidence"], 0) + 1
         by_scope[e["scope"]] = by_scope.get(e["scope"], 0) + 1
         by_trust[e["trust"]] = by_trust.get(e["trust"], 0) + 1
+    total_all = len(ms.all_entries())
     return {
         "total": len(entries),
+        "total_including_superseded": total_all,
+        "superseded": total_all - len(entries),
+        "cap": ms.MAX_LEARNED_RULES,
         "by_category": by_cat,
         "by_confidence": by_conf,
         "by_scope": by_scope,
         "by_trust": by_trust,
+        "pinned": len([e for e in entries if e.get("immutable")]),
         "journal_entries": len(ms.read_journal(5000)),
+    }
+
+
+def acceptance_stats() -> dict:
+    """落地验收趋势：每次提案落地前后的记忆库快照。"""
+    recs = ms.read_acceptance(500)
+    if not recs:
+        return {"count": 0}
+    deltas = []
+    for r in recs:
+        b, a = r.get("before") or {}, r.get("after") or {}
+        if "active" in b and "active" in a:
+            deltas.append(a["active"] - b["active"])
+    return {
+        "count": len(recs),
+        "net_growth": sum(deltas),
+        "replacements": len([r for r in recs if r.get("supersedes")]),
+        "last": recs[-1] if recs else None,
     }
 
 
 def proposal_stats() -> dict:
     pend = ms.list_proposals("pending")
     arch_dir = os.path.join(ms.PROPOSAL_DIR, "archive")
-    approved = rejected = deferred = 0
+    approved = rejected = deferred = supersede = 0
     if os.path.isdir(arch_dir):
         for n in os.listdir(arch_dir):
             if not n.endswith(".json"):
@@ -123,6 +146,8 @@ def proposal_stats() -> dict:
                 continue
             if p.get("status") == "approved":
                 approved += 1
+                if p.get("supersedes"):
+                    supersede += 1
     if os.path.isdir(ms.REJECTED_DIR):
         rejected = len([n for n in os.listdir(ms.REJECTED_DIR) if n.endswith(".json")])
     decided = approved + rejected
@@ -131,6 +156,7 @@ def proposal_stats() -> dict:
         "approved": approved,
         "rejected": rejected,
         "deferred": deferred,
+        "supersede_approved": supersede,
         "acceptance_rate": round(approved / decided, 3) if decided else None,
     }
 
@@ -142,6 +168,7 @@ def snapshot() -> dict:
         "feedback": feedback_stats(),
         "memory": memory_stats(),
         "proposals": proposal_stats(),
+        "acceptance": acceptance_stats(),
     }
 
 
@@ -167,14 +194,27 @@ def render(s: dict) -> str:
         L.append(f"  满意度          {fb['satisfaction_rate']}")
     mem = s["memory"]
     L.append("[记忆库]")
-    L.append(f"  条数 {mem['total']}   journal {mem['journal_entries']} 行")
+    L.append(f"  活动 {mem['total']}/{mem.get('cap', '-')}   pinned {mem.get('pinned', 0)}"
+             f"   已取代 {mem.get('superseded', 0)}   journal {mem['journal_entries']} 行")
     L.append(f"  分类 {mem['by_category']}")
     L.append(f"  置信 {mem['by_confidence']}   信任 {mem['by_trust']}")
     pr = s["proposals"]
     L.append("[提案闭环]")
-    L.append(f"  待审 {pr['pending']}  已批 {pr['approved']}  已驳 {pr['rejected']}")
+    L.append(f"  待审 {pr['pending']}  已批 {pr['approved']}  已驳 {pr['rejected']}"
+             f"  其中取代型 {pr.get('supersede_approved', 0)}")
     if pr.get("acceptance_rate") is not None:
         L.append(f"  批准率          {pr['acceptance_rate']}")
+    acc = s.get("acceptance") or {}
+    if acc.get("count"):
+        L.append("[落地验收]")
+        L.append(f"  已记录 {acc['count']} 次落地  净增 {acc['net_growth']:+d} 条"
+                 f"  取代型 {acc.get('replacements', 0)}")
+        last = acc.get("last") or {}
+        if last:
+            b, a = last.get("before") or {}, last.get("after") or {}
+            L.append(f"  最近: {last.get('title', '')[:40]}")
+            L.append(f"        活动 {b.get('active', '-')}→{a.get('active', '-')}"
+                     f"  覆盖 {b.get('coverage', '-')}→{a.get('coverage', '-')}")
     L.append("=" * 52)
     return "\n".join(L)
 

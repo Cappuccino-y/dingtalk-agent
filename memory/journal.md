@@ -504,3 +504,19 @@ IC 监控**已经加进去了**，现在是调度器里的第二个作业：
 - Summary: 扫描完成，提出 3 条提案，等待用户审批
 - proposals: prop_20261020-140405_9547,prop_20261020-140406_6652,prop_20261020-140406_cbd8
 
+## 2026-10-20T14:17:36 — evolve_skip
+- Summary: 跳过重复提案: Everything 搜索 Skill 必须全局可用
+- reason: 证据已被同一句原话的提案 prop_20261020-140405_9547 覆盖（pending: 新增或封装的 Skill 默认配置为全局可用）
+
+## 2026-10-20T14:17:36 — evolve_skip
+- Summary: 跳过重复提案: dingtalk-agent 应作为独立项目和独立 Git 仓库维护
+- reason: 证据与提案 prop_20261020-140406_cbd8 高度重合（pending: DingTalk Agent 是独立项目和独立 Git 仓库）
+
+## 2026-10-20T14:17:36 — evolve_skip
+- Summary: 跳过重复提案: Bot 后台作业应集中调度并支持定时与手动执行
+- reason: 证据与提案 prop_20261020-140406_6652 高度重合（pending: Bot 作业采用统一架构并同时支持定时与手动执行）
+
+## 2026-10-20T14:17:36 — evolve
+- Summary: 扫描完成，提出 3 条提案，等待用户审批
+- proposals: ,,
+

@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 
@@ -55,8 +56,15 @@ SYSTEM_PROMPT = """你是一个 AI 助理系统的「需求抽取器」。
 - 踩过的坑："刚才…出错了""又…了"
 
 对照规则：
-- 如果记忆索引里已有同类条目（标题/内容覆盖了这条要求）→ **不提案**
+- 如果记忆索引里已有同类条目（标题**或正文**覆盖了这条要求）→ **不提案**
 - 如果没有对应条目 → 提案，并在 evidence 里**原文引用**用户的原话
+- 如果新要求和某条已有条目**冲突/是它的修正**（比如用户后来改了口径）→
+  提案时填 `supersedes: <那条的 memoryId>`，body 写**修正后的完整内容**
+- 不要因为"想补充细节"就 supersede；只在口径真的变了时才这么做
+
+硬约束（系统会强制检查，违反的直接丢弃）：
+- 同一个 scope 最多 60 条活动记忆。快满了就优先提「合并/废弃」，不要硬塞新的
+- 打了 📌 的条目是 IMMUTABLE，**不要**提议取代它
 
 提案类型：
 - memory      —— 该沉淀成长期知识的坑/事实/模式
@@ -76,33 +84,40 @@ SYSTEM_PROMPT = """你是一个 AI 助理系统的「需求抽取器」。
    "confidence": "high|medium|low",
    "body": "触发条件: ...\\n动作: ...\\n适用范围: ...",
    "evidence": "用户原话引用",
+   "supersedes": "要取代的 memoryId（没有就省略或留空）",
    "risk": "落地后可能有什么副作用",
    "expected_gain": "预期改善"}
 ]}"""
 
 
 def collect_evidence() -> dict:
-    """收集证据。全部是**结构化摘要**，不塞原始大段文本（省 token 也避免污染）。"""
+    """收集证据。全部是**结构化摘要**，不塞原始大段文本（省 token 也避免污染）。
+
+    问答存档只用 held-in 那一半（奇数位）—— held-out 是验收用的冻结核，
+    提案器看过的例子就不能再当判例（否则验收是自证）。
+    """
     journal = ms.read_journal(RECENT_JOURNAL)
     rejected = ms.rejected_summaries(10)
-    idx_global = ms.index("global", 40)
-    idx_project = ms.index("project:dingtalk-agent", 40)
+    # 正文摘要而不是只给标题：标题措辞差异大，只给标题会让模型误判「已覆盖」
+    idx_global = ms.brief("global", limit=40)
+    idx_project = ms.brief("project:dingtalk-agent", limit=40)
 
     cards = []
-    arc = os.path.join(REPO, "bot", "bridge_data", "card_archive.json")
-    if os.path.exists(arc):
-        try:
-            data = json.load(open(arc, encoding="utf-8"))
-            items = list((data.get("cards") or {}).values())
-            items.sort(key=lambda c: c.get("at", 0))
-            for c in items[-RECENT_CARDS:]:
-                cards.append({
-                    "q": (c.get("question") or "")[:200],
-                    "a": (c.get("answer") or "")[:400],
-                    "session": c.get("session_id", ""),
-                })
-        except Exception as e:  # noqa: BLE001
-            print(f"[evolve] card_archive 读取失败: {e}", file=sys.stderr)
+    try:
+        from tools import eval_acceptance as ea
+        # 回填进 journal 的历史问答里含 held-out 判例，证据侧要剔掉（防泄漏）
+        ho = ea.heldout_fingerprints()
+        journal = [r for r in journal
+                   if not (r["fields"].get("source") == "card_archive"
+                           and f"{r['ts']}|{r['summary'][:200]}" in ho)]
+        for c in ea.evidence_cards(RECENT_CARDS):
+            cards.append({
+                "q": (c.get("question") or "")[:200],
+                "a": (c.get("answer") or "")[:400],
+                "session": c.get("session_id", ""),
+            })
+    except Exception as e:  # noqa: BLE001
+        print(f"[evolve] 读取 held-in 判例失败: {e}", file=sys.stderr)
 
     return {
         "journal": journal,
@@ -214,6 +229,9 @@ def parse_proposals(raw: str) -> list[dict]:
             p["category"] = "pattern"
         if p.get("confidence", "medium") not in ms.CONFIDENCES:
             p["confidence"] = "medium"
+        # supersedes 只接受 memoryId 形状，其他一律清空（防止 LLM 编个路径来穿越）
+        sup = str(p.get("supersedes") or "").strip()
+        p["supersedes"] = sup if re.fullmatch(r"mem_[A-Za-z0-9_]+", sup) else ""
         out.append(p)
     return out[:MAX_PROPOSALS]
 
@@ -352,14 +370,43 @@ def main() -> int:
         return 0
 
     for p in props:
+        # ---- 去重闸门（确定性，在推卡之前就拦掉）----
+        # 同一个坑提两次会生成两条记忆，这是记忆库退化的主因。
+        scope = p.get("scope", "global")
+        sup = p.get("supersedes", "")
+        seen, why = ms.evidence_seen(p.get("evidence", ""))
+        if seen and not sup:
+            print(f"[evolve] 跳过（{why}）")
+            ms.append_journal("evolve_skip", f"跳过重复提案: {p.get('title', '')[:60]}",
+                              reason=why)
+            continue
+        if not sup:
+            probe = f"{p.get('title', '')} {p.get('body', '')}"
+            near = [t for t in ms.find_similar(probe, threshold=ms.DUP_THRESHOLD, limit=2)
+                    if t[1]["scope"] == scope]
+            if near:
+                s, e = near[0]
+                print(f"[evolve] 跳过（与 [{e['memoryId']}] {s:.2f} 重合）")
+                ms.append_journal("evolve_skip", f"跳过近重复提案: {p.get('title', '')[:60]}",
+                                  similar=e["memoryId"], score=f"{s:.2f}")
+                continue
+        # 上限预检：满了就别推卡了，推了也批不了
+        actives = ms.count_active(scope)
+        if not sup and actives >= ms.MAX_LEARNED_RULES:
+            print(f"[evolve] 跳过（{scope} 已达上限 {ms.MAX_LEARNED_RULES}）")
+            ms.append_journal("evolve_skip", f"跳过提案（已达上限）: {p.get('title', '')[:60]}",
+                              scope=scope, active=actives)
+            continue
+
         pid = ms.save_proposal({
             "type": p.get("type", "memory"),
             "title": p.get("title", ""),
-            "scope": p.get("scope", "global"),
+            "scope": scope,
             "category": p.get("category", "pattern"),
             "confidence": p.get("confidence", "medium"),
             "body": p.get("body", ""),
             "evidence": p.get("evidence", ""),
+            "supersedes": sup,
             "risk": p.get("risk", ""),
             "expected_gain": p.get("expected_gain", ""),
             "source": "evolve",
