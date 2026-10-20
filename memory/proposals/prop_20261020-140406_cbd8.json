@@ -1,0 +1,16 @@
+{
+  "type": "memory",
+  "title": "DingTalk Agent 是独立项目和独立 Git 仓库",
+  "scope": "project:dingtalk-agent",
+  "category": "decision",
+  "confidence": "high",
+  "body": "触发条件: 维护代码、编写架构文档、配置依赖或说明部署边界时。\n动作: 将 DingTalk Agent 作为独立项目和独立 Git 仓库维护，不将其描述或依赖为 MainToy、FindCap 下的子模块或原有同一项目。\n适用范围: dingtalk-agent 的代码、文档、依赖、部署与仓库引用。",
+  "evidence": "首先我想跟你澄清的是，这是一个单独的项目。你把 Listen Up 那个东西、DingTalk 那个东西，从 FindCap 那个文件夹下面拿过来，放在我们的项目路径下，然后给它改个名字或者怎么回事。这是一个单独的目镜，是一个单独的 Git 仓库哈，不是和之前的那个一样的",
+  "risk": "若旧目录中的脚本、计划任务或共享依赖仍被沿用，可能再次混淆两个项目的维护边界。",
+  "expected_gain": "让后续 Agent 准确理解项目边界，避免将独立仓库错误地当作 MainToy 或 FindCap 的子模块处理。",
+  "source": "evolve",
+  "proposed_by": "MiniMax-M3.1-Flash",
+  "id": "prop_20261020-140406_cbd8",
+  "created_at": "2026-10-20T06:04:06Z",
+  "status": "pending"
+}

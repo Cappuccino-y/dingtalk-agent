@@ -140,11 +140,29 @@ def build_prompt(ev: dict) -> str:
     return "\n".join(parts)
 
 
-def call_llm(prompt: str) -> str:
+def call_llm(prompt: str) -> tuple[str, str]:
+    """调 LLM 提提案。返回 (原始输出, 实际用的模型)。
+
+    主模型失败（欠费/限流/超时）时自动降级到备用模型 —— 这是**每天凌晨无人值守**
+    跑的作业，不能因为一次抽风就整晚不产出。
+    """
     from tools.llm_client import OpenAICompatibleClient
+    primary = os.getenv("EVOLVE_LLM_MODEL", "MiniMax-M3.1-Flash")
+    fallback = os.getenv("EVOLVE_LLM_FALLBACK_MODEL", "MiniMax-M3")
     client = OpenAICompatibleClient.for_job("EVOLVE")
     print(f"[evolve] LLM: model={client.model} base={getattr(client.client, 'base_url', '?')}")
-    return client.generate(prompt, system_prompt=SYSTEM_PROMPT)
+    try:
+        return client.generate(prompt, system_prompt=SYSTEM_PROMPT), client.model
+    except Exception as e:  # noqa: BLE001
+        print(f"[evolve] 主模型 {primary} 失败：{e}", file=sys.stderr)
+        if not fallback or fallback == primary:
+            raise
+        fb = OpenAICompatibleClient(model=fallback,
+                                    api_key=os.getenv("MINIMAX_API_KEY"),
+                                    base_url=os.getenv("EVOLVE_LLM_BASE_URL")
+                                    or "https://api.minimaxi.com/v1")
+        print(f"[evolve] 降级到 {fallback}", file=sys.stderr)
+        return fb.generate(prompt, system_prompt=SYSTEM_PROMPT), fallback
 
 
 _THINK_RE = None
@@ -314,7 +332,7 @@ def main() -> int:
     prompt = build_prompt(ev)
     print(f"[evolve] 证据：journal {len(ev['journal'])} 条 / 问答 {len(ev['recent_qa'])} 条")
     try:
-        raw = call_llm(prompt)
+        raw, model = call_llm(prompt)
     except Exception as e:  # noqa: BLE001
         print(f"[evolve] LLM 调用失败: {e}", file=sys.stderr)
         return 1
@@ -323,7 +341,7 @@ def main() -> int:
     if args.json:
         print(json.dumps(props, ensure_ascii=False, indent=2))
     else:
-        print(f"[evolve] LLM 提出 {len(props)} 条提案")
+        print(f"[evolve] {model} 提出 {len(props)} 条提案")
     if not props:
         ms.append_journal("evolve", "本次扫描没有值得提的提案",
                           journal_entries=len(ev["journal"]))
@@ -345,6 +363,7 @@ def main() -> int:
             "risk": p.get("risk", ""),
             "expected_gain": p.get("expected_gain", ""),
             "source": "evolve",
+            "proposed_by": model,      # 哪个模型提的（provenance）
         })
         p["id"] = pid
         print(f"[evolve] 提案已存 {pid}: {p.get('title', '')[:50]}")
