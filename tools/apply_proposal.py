@@ -73,7 +73,7 @@ def approve(pid: str, force: bool = False) -> tuple[bool, str]:
     # ---- 去重闸门（确定性，不经 LLM）----
     # 已经学过的不要再学一遍：记忆库单调重复是自我改进系统最常见的退化方式。
     if not supersedes and not force:
-        seen, why = ms.evidence_seen(p.get("evidence", ""))
+        seen, why = ms.evidence_seen(p.get("evidence", ""), exclude_pid=pid)
         if seen:
             return False, f"跳过（证据已处理过）: {why}。确认要重复记录请用 --force"
         probe = f"{p.get('title', '')} {p.get('body', '')}"
@@ -247,7 +247,7 @@ def main() -> int:
             print(f"    依据: {p.get('evidence', '-')}")
             print(f"    风险: {p.get('risk', '-')}")
             # 预演去重闸门：让用户点批准前就知道会不会被拦
-            seen, why = ms.evidence_seen(p.get("evidence", ""))
+            seen, why = ms.evidence_seen(p.get("evidence", ""), exclude_pid=p.get("id", ""))
             if seen:
                 print(f"    ⚠️ 去重: {why}")
         return 0

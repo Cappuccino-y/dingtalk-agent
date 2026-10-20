@@ -382,14 +382,16 @@ def find_similar(text: str, scope: str | None = None,
     return scored[:limit]
 
 
-def evidence_seen(quote: str, threshold: float = 0.72) -> tuple[bool, str]:
-    """这句「用户原话」是不是已经产出过提案了？（批准或驳回都算见过）
+def evidence_seen(quote: str, threshold: float = 0.72,
+                  exclude_pid: str = "") -> tuple[bool, str]:
+    """这句「用户原话」是不是已经产出过提案了？（待审 / 批准 / 驳回都算见过）
 
     为什么用证据而不是标题做去重：标题/正文是 LLM 重写过的，同一件事能写成
     十种措辞，字符串相似度抓不住（实测同义改写只有 0.27）。但 **evidence 是
     用户的原文引用**，几乎逐字复现 —— 同一条要求的证据一定高度重合。
 
-    返回 (是否见过, 说明)。
+    exclude_pid：**批准时必须传自己的 id**，否则待审提案会匹配到自己，
+    导致任何提案都过不了去重闸门。
     """
     if not quote or len(quote.strip()) < 8:
         return False, ""
@@ -405,6 +407,8 @@ def evidence_seen(quote: str, threshold: float = 0.72) -> tuple[bool, str]:
             try:
                 p = json.load(open(os.path.join(d, name), encoding="utf-8"))
             except Exception:
+                continue
+            if exclude_pid and p.get("id") == exclude_pid:
                 continue
             ev = p.get("evidence") or ""
             if ev:

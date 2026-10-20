@@ -249,7 +249,7 @@ def preflight(pid: str) -> dict:
     if not p:
         return {"error": f"提案不存在: {pid}"}
     scope = p.get("scope", "global")
-    seen, why = ms.evidence_seen(p.get("evidence", ""))
+    seen, why = ms.evidence_seen(p.get("evidence", ""), exclude_pid=pid)
     probe = f"{p.get('title', '')} {p.get('body', '')}"
     near = ms.find_similar(probe, threshold=0.0, limit=3)
     return {
