@@ -49,3 +49,20 @@ source.agentIds: evolve, user-approved
 动作: 将 DingTalk Agent 作为独立项目和独立 Git 仓库维护，不将其描述或依赖为 MainToy、FindCap 下的子模块或原有同一项目。
 适用范围: dingtalk-agent 的代码、文档、依赖、部署与仓库引用。
 
+---
+memoryId: mem_0406f975_09403
+timestamp: 2026-10-21T19:03:23Z
+scope: project:dingtalk-agent
+category: decision
+title: 流式回复不得因避免展开而截断内容
+tags: [evolve]
+confidence: high
+trust: self
+source.messageIds: journal:2026-10-20T02:23:00, proposal:prop_20261022-030300_c0dd
+source.agentIds: evolve, user-approved
+---
+
+触发条件: 流式更新中的回复超过显示限度，出现“展开”或持续刷新。
+动作: 不再为了规避展开而限制或截断可见回复；允许刷新或展开，优先保证回复内容完整可读。
+适用范围: dingtalk-agent 的流式回复展示。
+
