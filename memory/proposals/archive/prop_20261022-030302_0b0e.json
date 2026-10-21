@@ -1,0 +1,18 @@
+{
+  "type": "convention",
+  "title": "结构性改动需同步维护 Bot 架构文档",
+  "scope": "project:dingtalk-agent",
+  "category": "pattern",
+  "confidence": "high",
+  "body": "触发条件: 修改 Bot 的进程架构、作业调度、目录边界、框架或其他结构性代码。\n动作: 同步更新项目架构文档中的架构说明、改动史和相关常量，并在 agent 维护约定中保留持续维护要求。\n适用范围: dingtalk-agent 项目。",
+  "evidence": "问一下你机器人的所有架构、改动和框架什么的，顺便留个文档方便 agent 一直维护？网上那些类似项目都是怎么做的？可以参考一下",
+  "supersedes": "",
+  "risk": "每次结构性改动都会增加文档同步成本，漏记时可能导致文档与实际实现不一致。",
+  "expected_gain": "后续 agent 可以依据统一文档理解现有架构，并持续准确记录后续改动。",
+  "source": "evolve",
+  "proposed_by": "MiniMax-M3.1-Flash",
+  "id": "prop_20261022-030302_0b0e",
+  "created_at": "2026-10-21T19:03:02Z",
+  "status": "approved",
+  "decided_at": "2026-10-21T19:03:42Z"
+}

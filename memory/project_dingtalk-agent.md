@@ -66,3 +66,20 @@ source.agentIds: evolve, user-approved
 动作: 不再为了规避展开而限制或截断可见回复；允许刷新或展开，优先保证回复内容完整可读。
 适用范围: dingtalk-agent 的流式回复展示。
 
+---
+memoryId: mem_898128f0_09422
+timestamp: 2026-10-21T19:03:42Z
+scope: project:dingtalk-agent
+category: preference
+title: 结构性改动需同步维护 Bot 架构文档
+tags: [convention, approved]
+confidence: high
+trust: self
+source.messageIds: journal:2026-10-20T12:23:03, proposal:prop_20261022-030302_0b0e
+source.agentIds: evolve, user-approved
+---
+
+触发条件: 修改 Bot 的进程架构、作业调度、目录边界、框架或其他结构性代码。
+动作: 同步更新项目架构文档中的架构说明、改动史和相关常量，并在 agent 维护约定中保留持续维护要求。
+适用范围: dingtalk-agent 项目。
+
