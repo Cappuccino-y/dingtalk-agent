@@ -544,3 +544,78 @@ IC 监控**已经加进去了**，现在是调度器里的第二个作业：
 - supersedes: -
 - evidence_refs: card:oc-88a1b0ef9f114f118367, session:ses_ea877a107ffe1IKS2gjnjD5Jgt
 
+## 2026-10-22T02:42:41 — stop
+- Summary: 用户反馈：stop
+- conv: cidwKuyECv5z+YK5cPBDeiA3wT/FKag4TRfj0dqHzRfrDk=
+- session: ses_ea068f460ffel74aIKhwciWQBC
+- detail: 用户中断了这一轮
+
+## 2026-10-22T03:03:02 — evolve
+- Summary: 扫描完成，提出 3 条提案，等待用户审批
+- proposals: prop_20261022-030300_c0dd,prop_20261022-030301_d5de,prop_20261022-030302_0b0e
+
+## 2026-10-22T03:03:23 — proposal_approved
+- Summary: 提案已落地: 流式回复不得因避免展开而截断内容
+- proposal: prop_20261022-030300_c0dd
+- memory_id: mem_0406f975_09403
+- scope: project:dingtalk-agent
+- supersedes: -
+- evidence_refs: journal:2026-10-20T02:23:00
+
+## 2026-10-22T03:03:42 — proposal_approved
+- Summary: 提案已落地: 结构性改动需同步维护 Bot 架构文档
+- proposal: prop_20261022-030302_0b0e
+- memory_id: mem_898128f0_09422
+- scope: project:dingtalk-agent
+- supersedes: -
+- evidence_refs: journal:2026-10-20T12:23:03
+
+## 2026-10-22T03:03:54 — proposal_rejected
+- Summary: 提案被驳回: IC Monitor 应纳入 Bot 启动后自动运行与发送链路
+- proposal: prop_20261022-030301_d5de
+- note: 用户在钉钉审批卡上驳回
+
+## 2026-10-22T03:04:11 — stop
+- Summary: 用户反馈：stop
+- conv: cidwKuyECv5z+YK5cPBDeiA3wT/FKag4TRfj0dqHzRfrDk=
+- session: ses_ea068f460ffel74aIKhwciWQBC
+- detail: 用户中断了这一轮
+
+## 2026-10-22T03:31:31 — stop
+- Summary: 用户反馈：stop
+- conv: cidwKuyECv5z+YK5cPBDeiA3wT/FKag4TRfj0dqHzRfrDk=
+- session: ses_ea068f460ffel74aIKhwciWQBC
+- detail: 用户中断了这一轮
+
+## 2026-10-22T03:47:54 — stop
+- Summary: 用户反馈：stop
+- conv: cidwKuyECv5z+YK5cPBDeiA3wT/FKag4TRfj0dqHzRfrDk=
+- session: ses_ea068f460ffel74aIKhwciWQBC
+- detail: 用户中断了这一轮
+
+## 2026-10-22T09:23:39 — evolve
+- Summary: 扫描完成，提出 2 条提案，等待用户审批
+- proposals: prop_20261022-092337_9bf1,prop_20261022-092339_dca9
+
+## 2026-10-22T09:32:03 — proposal_approved
+- Summary: 提案已落地: 长耗时处理期间必须主动展示状态，避免再次静默
+- proposal: prop_20261022-092337_9bf1
+- memory_id: mem_3647a4f3_32723
+- scope: project:dingtalk-agent
+- supersedes: -
+- evidence_refs: -
+
+## 2026-10-22T09:37:53 — stop
+- Summary: 用户反馈：stop
+- conv: cidwKuyECv5z+YK5cPBDeiA3wT/FKag4TRfj0dqHzRfrDk=
+- session: ses_e9ec03994ffe8wp922KMVDvSAF
+- detail: 用户中断了这一轮
+
+## 2026-10-22T11:21:24 — proposal_approved
+- Summary: 提案已落地: autoworkflow.py 视为已知可用实现，接入监控时不得擅改
+- proposal: prop_20261022-092339_dca9
+- memory_id: mem_3aa1461f_39284
+- scope: project:dingtalk-agent
+- supersedes: -
+- evidence_refs: -
+

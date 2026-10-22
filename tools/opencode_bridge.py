@@ -58,8 +58,14 @@ SERVICE_JSON = os.path.expanduser(r"~\.local\state\opencode\service.json")
 DEFAULT_MODEL = {"providerID": "volcengine-agent-plan", "id": "deepseek-v4.1-flash"}
 # 兜底模型：火山 Agent Plan 额度耗尽 / 报错时自动切到 MiniMax 继续回复。
 # providerID / model id 已对着本机 /api/model 接口核实过。
+# ⚠️ model id 必须是 /api/model 清单里**真实存在**的那一个。
+# 切换接口不校验 id：不存在的 id 也返回 204，看起来"切成功了"，
+# 但下一轮压根不会产生任何 assistant 消息（会话直接 idle），
+# 用户只拿到一张空卡片 + "已切到 XXX" 的假提示。
+# （2026-10-22 踩过：这里写的是 MiniMax-M3.1-Flash-Preview，
+#  本机只有 MiniMax-M3.1-Flash 和 MiniMax-M3，Preview 版不存在。）
 FALLBACK_MODEL = {"providerID": "minimax-cn-coding-plan",
-                  "id": "MiniMax-M3.1-Flash-Preview"}
+                  "id": "MiniMax-M3.1-Flash"}
 
 # /model 提问卡里给出的可选模型（手机端点选，避免手打 id 打错）。
 # key = "providerID|modelID"：同一个模型 id 可能挂在多个 provider 下
@@ -88,7 +94,11 @@ _QUOTA_ERROR_PAT = (
 POLL_INTERVAL = 0.6
 MAX_PROGRESS_LINES = 6
 MAX_ANSWER_CHARS = 2800
-WAIT_TIMEOUT = 900
+# 单轮等待上限（秒）。2026-10-22 从 900 提到 1800：
+# 900s 太短 —— 一旦这轮要跑长任务（抓数、等接口、重跑一遍），
+# 桥接层会在模型还没说完时把卡片收尾，用户拿到的是「半句话当最终回答」。
+# 真实案例：IC 诊断那轮 904.3s 被掐断，卡片只剩 64 个字的前言。
+WAIT_TIMEOUT = 1800
 # 预判式轮换：**默认关闭**。
 # 原因：OpenCode 自带 compaction（auto 默认开，keep 15000，buffer 10%），
 # 接近上限时会自动把旧消息压成摘要并保留最近 15k tokens；
@@ -1222,12 +1232,64 @@ def _journal_feedback(kind, conv, session_id, extra=""):
         logger.warning("journal 写入失败：%s", e)
 
 
+# 钉钉回传的决定值正常是 option.value（approve/reject/defer），
+# 但老卡、中文标签、手改过的模板都可能塞别的写法 —— 认不出来就返回 ""，**绝不猜**。
+_DECISION_ALIASES = {
+    "approve": "approve", "批准": "approve", "同意": "approve", "通过": "approve",
+    "reject": "reject", "驳回": "reject", "拒绝": "reject", "不同意": "reject",
+    "defer": "defer", "稍后再说": "defer", "暂缓": "defer", "以后再说": "defer",
+}
+
+
+def _norm_decision(value) -> str:
+    """把回调里的决定归一成 approve/reject/defer；认不出来返回 ""。"""
+    s = str(value or "").strip()
+    if not s:
+        return ""
+    return _DECISION_ALIASES.get(s) or _DECISION_ALIASES.get(s.lower(), "")
+
+
+def _repush_pending_cards(pids, log=None):
+    """把还没定的提案**重新推一张批量卡**。
+
+    场景：用户点了一次提交，但有提案没选（或这次没读懂）——
+    没有这一步，那些提案就再也没人能批（只能等下一轮 evolve，可能隔好几天）。
+    只推指定的 pids；pids 为空表示推所有还挂着的 pending 提案。
+    """
+    log = log or logger
+    try:
+        from tools import memory_store as _ms
+        from tools import evolve as _ev
+        want = {p for p in (pids or []) if p}
+        items = []
+        for p in _ms.list_proposals("pending"):
+            pid = p.get("id") or ""
+            if not pid or (want and pid not in want):
+                continue
+            items.append((pid, p))
+        if not items:
+            return False
+        items = items[:4]
+        ok = _ev.push_approval_batch_card(items)
+        log.info("改进提案：重新推送 %d 条待批（%s）ok=%s",
+                 len(items), ",".join(i[0] for i in items), ok)
+        return bool(ok)
+    except Exception as e:  # noqa: BLE001
+        log.warning("改进提案：重新推送审批卡失败 %s", e)
+        return False
+
+
 def _handle_evolve_proposal(conv, action, params, log=None, out_track=""):
     """处理改进提案审批卡的回调（**无状态**：提案 id 编在 question_id 里）。
 
     evolve 作业是 scheduler 的独立子进程，推审批卡时 bot 进程里没有等待槽，
     所以这里按提案 id 直接读 memory/proposals/<id>.json 落地/驳回。
     这样即使 bot 中途重启，审批也照样能处理。
+
+    **一条铁律（2026-10-22 立的）**：读不懂用户的决定时，
+    **绝不把卡片收尾**。收尾 = 用户在这张卡上再也没法作答，提案就成孤儿，
+    只能等下一轮 evolve 慢慢补 —— 用户看到的却是"已取消 ❓ 没看懂你的选择"。
+    正确做法：把 card_status 退回 pending（表单重新可提交）+ 提示重选。
     """
     log = log or logger
     qid = ""
@@ -1238,7 +1300,27 @@ def _handle_evolve_proposal(conv, action, params, log=None, out_track=""):
             break
     if not qid:
         return False
+
+    # ---- 关键闸门：只有**真的带答案**的回调才算用户作答 ----
+    # 钉钉在卡片渲染/打开时会回调一次 params={"fromConfig": ""}，
+    # 那是卡片生命周期事件，不是用户点选择。
+    # 2026-10-22 之前没拦这个：第二张审批卡在用户还没碰它的时候
+    # 就被判成"❓ 没看懂你的选择"并直接收尾 —— 提案其实还挂着。
+    has_form = bool((params or {}).get("form"))
+    cancelled = bool((params or {}).get("user_cancel"))
+    if not has_form and not cancelled:
+        log.info("改进提案：非作答事件（%s），忽略（卡片保持待提交）",
+                 list((params or {}).keys()))
+        return False
+
     pid = qid.split("evolve:", 1)[1].strip()
+    if not pid:
+        return False
+    # 批量审批卡：evolve:batch:<pid1>,<pid2>,...
+    batch = []
+    if pid.startswith("batch:"):
+        batch = [p.strip() for p in pid[len("batch:"):].split(",") if p.strip()]
+        pid = batch[0] if batch else ""
     if not pid:
         return False
 
@@ -1251,12 +1333,12 @@ def _handle_evolve_proposal(conv, action, params, log=None, out_track=""):
         return False
 
     answers = _cv.parse_ask_answer(params) or {}
-    decision = answers.get("decision")
-    if isinstance(decision, list):
-        decision = decision[0] if decision else ""
-    decision = (decision or "").strip()
-    if (params or {}).get("user_cancel"):
-        decision = "defer"
+
+    def _decision_of(key):
+        d = answers.get(key)
+        if isinstance(d, list):
+            d = d[0] if d else ""
+        return _norm_decision(d)
 
     def _finish(status, summary):
         """回写卡片状态 —— 卡片是别的进程推的，bot 进程没有它的对象，
@@ -1267,30 +1349,68 @@ def _handle_evolve_proposal(conv, action, params, log=None, out_track=""):
         except Exception as e:  # noqa: BLE001
             log.warning("改进提案卡片状态回写失败：%s", e)
 
-    try:
+    def _apply_one(target_pid, decision):
+        """按决定落地一条提案。返回 (是否成功, 展示文本)。"""
         if decision == "approve":
-            ok, msg = _ap.approve(pid)
-            _finish(_cv.ASK_STATUS_SUBMITTED if ok else _cv.ASK_STATUS_CANCELLED,
-                    ("✅ 已批准并落地：%s" % msg) if ok else ("❌ 批准失败：%s" % msg))
-        elif decision == "reject":
-            ok, msg = _ap.reject(pid, note="用户在钉钉审批卡上驳回")
-            _finish(_cv.ASK_STATUS_CANCELLED,
-                    "🚫 已驳回：%s" % msg if ok else "❌ 驳回失败：%s" % msg)
-        elif decision == "defer":
-            ok, msg = _ap.defer(pid)
-            _finish(_cv.ASK_STATUS_EXPIRED, "⏸ 已暂缓：%s" % msg)
-        else:
-            log.info("改进提案：无法识别的决定 %r conv=%s pid=%s",
-                     decision, conv, pid)
-            _finish(_cv.ASK_STATUS_CANCELLED, "❓ 没看懂你的选择，提案保持待审批")
+            ok, msg = _ap.approve(target_pid)
+            return ok, ("✅ 已批准并落地：%s" % msg) if ok else ("❌ 批准失败：%s" % msg)
+        if decision == "reject":
+            ok, msg = _ap.reject(target_pid, note="用户在钉钉审批卡上驳回")
+            return ok, ("🚫 已驳回：%s" % msg) if ok else ("❌ 驳回失败：%s" % msg)
+        if decision == "defer":
+            ok, msg = _ap.defer(target_pid)
+            return ok, ("⏸ 已暂缓：%s" % msg)
+        return False, "❓ 没看懂你的选择（%r）" % decision
+
+    try:
+        if batch:
+            # ---- 批量审批卡：一条提案一个选项，一次提交全部结算 ----
+            results = []
+            n_ok = 0
+            left = []
+            for idx, target_pid in enumerate(batch):
+                # 批量卡的表单域按序号命名（p0 / p1 / ...），
+                # 第 N 个域对应第 N 个提案（映射关系编在 question_id 里）。
+                decision = _decision_of("p%d" % idx)
+                if not decision and len(batch) == 1:
+                    # 字段名对不上（老模板/老卡用的就是 "decision"）→ 退回老字段名
+                    decision = _decision_of("decision")
+                if (params or {}).get("user_cancel"):
+                    decision = "defer"
+                if not decision:
+                    # 没选 → **不动这条提案**（保持 pending，还能被批），
+                    # 收尾后马上给它重推一张卡，别让它变成没人管的孤儿。
+                    left.append(target_pid)
+                    results.append("%s ⏸ 没选，仍待审批" % target_pid[-8:])
+                    log.info("改进提案 %s：没选，保持待审批（稍后重推卡）", target_pid)
+                    continue
+                ok, text = _apply_one(target_pid, decision)
+                n_ok += 1 if ok else 0
+                results.append("%s %s" % (target_pid[-8:], text))
+                log.info("改进提案 %s：%s（决定=%s）", target_pid, text, decision)
+            _finish(_cv.ASK_STATUS_SUBMITTED, "｜".join(results))
+            if left:
+                _repush_pending_cards(left, log=log)
+            return bool(n_ok)
+
+        decision = _decision_of("decision")
+        if (params or {}).get("user_cancel"):
+            decision = "defer"
+        if decision not in ("approve", "reject", "defer"):
+            # 读不懂就**别收尾**：退回 pending 让用户再选一次。
+            # 收尾 = 这张卡再也没人能作答，提案就成孤儿了。
+            log.info("改进提案：读不懂决定（conv=%s pid=%s fields=%s），卡片退回待提交",
+                     conv, pid, sorted(answers.keys()))
+            _finish(_cv.ASK_STATUS_PENDING, "没读到你的选择，请再选一次提交")
             return False
+        ok, text = _apply_one(pid, decision)
+        _finish(_cv.ASK_STATUS_SUBMITTED if ok else _cv.ASK_STATUS_CANCELLED, text)
+        log.info("改进提案 %s：%s（决定=%s）", pid, text, decision)
+        return bool(ok)
     except Exception as e:  # noqa: BLE001
         log.warning("改进提案处理失败 pid=%s: %s", pid, e)
-        _finish(_cv.ASK_STATUS_CANCELLED, "❌ 处理出错：%s" % e)
+        _finish(_cv.ASK_STATUS_PENDING, "❌ 处理出错，请再提交一次")
         return False
-
-    log.info("改进提案 %s：%s（决定=%s）", pid, msg, decision or "-")
-    return bool(ok)
 
 
 def handle_card_action(conv, action, params, log=None):
@@ -2930,6 +3050,33 @@ def is_quota_error(msg) -> bool:
     return any(k in s for k in _QUOTA_ERROR_PAT)
 
 
+def error_summary(msg, limit=200):
+    """把一条错误消息压成一句人能看懂的话（给卡片用）。
+
+    之前失败时卡片只会显示"（空回复）"，用户完全看不到 opencode 到底报的什么错
+    （比如 "Model unavailable" / "exceeded the 5-hour usage quota"）。
+    """
+    if not msg:
+        return "（无错误详情）"
+    bits = []
+    err = msg.get("error")
+    if err:
+        bits.append(json.dumps(err, ensure_ascii=False)
+                    if isinstance(err, (dict, list)) else str(err))
+    for p in msg.get("content") or []:
+        if not isinstance(p, dict):
+            continue
+        if p.get("type") in ("error", "reasoning-error"):
+            bits.append(json.dumps(p, ensure_ascii=False))
+        elif p.get("type") == "text" and p.get("text"):
+            bits.append(p["text"])
+    s = " ".join(bits).strip()
+    if not s:
+        s = "（无错误详情）"
+    s = re.sub(r"\s+", " ", s)
+    return s[:limit] + ("…" if len(s) > limit else "")
+
+
 # ---------------------------------------------------------------- 会话映射
 class SessionMap:
     """钉钉会话 -> OpenCode session 的持久映射，带轮换计数。
@@ -3176,6 +3323,36 @@ class AgentTurn:
         return out
 
     # ---- 一轮驱动（事件流 + 兜底轮询）----
+    @staticmethod
+    def _resolve_fallback(oc):
+        """挑一个**本机真的存在**的兜底模型。
+
+        返回 (model_dict | None, 错误说明)。
+
+        为什么必须自己校验：切换接口**不校验 id**——不存在的模型也返回 204，
+        看起来"切成功了"，但 opencode 下一轮压根不产生任何 assistant 消息
+        （会话直接 idle），用户拿到的是一张空卡片 + "已切到 XXX"的假提示。
+        2026-10-22 就是这么翻车的：兜底 id 写成了 MiniMax-M3.1-Flash-Preview，
+        本机只有 MiniMax-M3.1-Flash。
+        """
+        try:
+            avail = oc.models()
+        except Exception as e:  # noqa: BLE001
+            return None, f"取模型清单失败（{e}）"
+        if not avail:
+            return None, "取不到本机模型清单"
+        pairs = {(m.get("providerID"), m.get("id")) for m in avail}
+        want = (FALLBACK_MODEL["providerID"], FALLBACK_MODEL["id"])
+        if want in pairs:
+            return {"providerID": want[0], "id": want[1]}, ""
+        # 兜底 id 过期了：同 provider 下退而求其次，别直接放弃。
+        alts = sorted(i for (p, i) in pairs if p == FALLBACK_MODEL["providerID"])
+        if alts:
+            return ({"providerID": FALLBACK_MODEL["providerID"], "id": alts[0]},
+                    f"兜底模型 {FALLBACK_MODEL['id']} 已失效，改用 {alts[0]}")
+        return None, (f"本机没有 {FALLBACK_MODEL['providerID']}/"
+                      f"{FALLBACK_MODEL['id']} 这个兜底模型")
+
     def _run_turn(self, oc, sid, writer, q, prompt_text, files, t0):
         """投递消息 → 边跑边刷卡片 → 等空闲 → 取最终回答。
 
@@ -3202,6 +3379,13 @@ class AgentTurn:
             "status": None,
             "last_event": time.time(),
             "message": None,
+            # 本轮是否产生了**新的** assistant 消息。
+            # 兜底模型 id 写错时，opencode 会直接 idle 而不产生任何消息——
+            # 此时 last_assistant 返回的仍是上一轮的旧消息，
+            # 不标记 stale 就会把旧错误消息当成本轮结果（显示"空回复"）。
+            "stale": False,
+            # 本轮是否**等超时**（还没跑完就被桥接层收尾）
+            "timed_out": False,
         }
 
         prev_id = None
@@ -3219,6 +3403,11 @@ class AgentTurn:
             try:
                 time.sleep(0.3)
                 oc.wait_idle(sid, timeout=WAIT_TIMEOUT)
+            except requests.exceptions.ReadTimeout:
+                # 等超时 = 这一轮还没跑完，**不是**失败。
+                # 必须记下来：否则半截正文会被当成最终回答收尾（见下方 timed_out 分支）。
+                st["timed_out"] = True
+                logger.warning("等待超时（%.0fs），本轮未跑完：sid=%s", WAIT_TIMEOUT, sid)
             except Exception as e:  # noqa: BLE001
                 logger.warning("wait_idle error: %s", e)
             finally:
@@ -3296,6 +3485,8 @@ class AgentTurn:
             "parts": st["parts"],
             "status": st["status"],
             "message": st["message"],
+            "stale": st["stale"],
+            "timed_out": st.get("timed_out", False),
         }
 
     @staticmethod
@@ -3373,6 +3564,12 @@ class AgentTurn:
             return
         if not m or (not force and m.get("id") == prev_id):
             return
+        # 本轮没有产生新 assistant 消息：最后一条还是进这一轮之前的那条。
+        # 典型场景 = 切到了不存在的模型 id，opencode 直接 idle 不产出消息。
+        # 必须标出来，否则会把上一轮的旧消息（连同它的 model / finish）
+        # 当成本轮结果 → 卡片显示"空回复 + 旧模型名"。
+        if prev_id and m.get("id") == prev_id:
+            st["stale"] = True
         parts, reply = extract_parts(m)
         if reply:
             st["rest_text"] = reply
@@ -3466,31 +3663,84 @@ class AgentTurn:
                 # ---- 主模型额度/限流耗尽 → 自动切到兜底模型重来一次 ----
                 cur_msg = run.get("message")
                 cur_pid = run.get("provider") or ""
+                fb_err = ""
                 if (cur_msg and is_quota_error(cur_msg)
                         and cur_pid != FALLBACK_MODEL["providerID"]):
                     logger.warning("主模型不可用（%s/%s），切换兜底模型 %s/%s",
                                    cur_pid, run.get("model"),
                                    FALLBACK_MODEL["providerID"],
                                    FALLBACK_MODEL["id"])
-                    try:
-                        oc.switch_model(sid, FALLBACK_MODEL["providerID"],
-                                        FALLBACK_MODEL["id"])
-                    except Exception as e:  # noqa: BLE001
-                        logger.error("切换兜底模型失败: %s", e)
-                    else:
+                    fb, fb_err = self._resolve_fallback(oc)
+                    if fb is None:
+                        # 兜底模型本身不可用 → 不切、不假装切了，
+                        # 直接把原因交回给用户（否则又是一张空卡片）。
+                        logger.error("兜底模型不可用：%s", fb_err)
                         if writer:
-                            writer.note(
-                                f"⚠️ 主模型额度不足，已切到 {FALLBACK_MODEL['id']}")
-                        run = self._run_turn(oc, sid, writer, q, prompt_text,
-                                             files, t0)
+                            writer.note(f"⚠️ 兜底模型不可用：{fb_err}")
+                    else:
+                        try:
+                            oc.switch_model(sid, fb["providerID"], fb["id"])
+                        except Exception as e:  # noqa: BLE001
+                            logger.error("切换兜底模型失败: %s", e)
+                            fb_err = f"切换到 {fb['id']} 失败：{e}"
+                            if writer:
+                                writer.note(f"⚠️ {fb_err}")
+                        else:
+                            # 回读确认真的切过去了：切换接口不校验 id，
+                            # 不回读就没法区分"切好了"和"切了个不存在的模型"。
+                            cur = oc.session_model(sid) or {}
+                            if (cur.get("providerID") != fb["providerID"]
+                                    or cur.get("id") != fb["id"]):
+                                fb_err = (f"切到 {fb['providerID']}/{fb['id']} 没生效"
+                                          f"（现在还是 {cur.get('providerID')}/"
+                                          f"{cur.get('id')}）")
+                                logger.error("%s", fb_err)
+                                if writer:
+                                    writer.note(f"⚠️ {fb_err}")
+                            else:
+                                if writer:
+                                    writer.note(
+                                        f"⚠️ 主模型额度不足，已切到 {fb['id']}")
+                                run = self._run_turn(oc, sid, writer, q, prompt_text,
+                                                     files, t0)
+                                if run.get("stale"):
+                                    # 切过去了却一个 assistant 消息都没有：
+                                    # 模型 id 不存在 / provider 拿不到授权。
+                                    fb_err = (f"切到 {fb['providerID']}/{fb['id']} 后"
+                                              f"没有任何回复")
+                                    logger.error("%s", fb_err)
             finally:
                 bus.unsubscribe(sid, q)
 
             elapsed = time.time() - t0
             interrupted = bool(run.get("status") and "中断" in run["status"])
+            timed_out = bool(run.get("timed_out"))
             final_text = (run.get("text") or "").strip()
-            if not final_text:
-                final_text = "🛑 已按你的要求中断。" if interrupted else "（空回复）"
+            if timed_out:
+                # 等超时 = 模型还在干活，**不是**回答完了。
+                # 把半截正文当最终回答交出去，用户会以为"就这？"——
+                # 2026-10-22 那张卡就是这么只剩 64 个字的。
+                # 所以：如实标注截断 + 给出续做入口，别装作答完了。
+                tail = (f"\n\n⏱ 这一轮等了 {WAIT_TIMEOUT // 60} 分钟还没跑完，"
+                        f"我先停在这儿（**上面的内容可能没做完**）。"
+                        f"回一句「继续刚才的」我就接着做。")
+                final_text = (final_text + tail) if final_text else (
+                    f"⏱ 这一轮等了 {WAIT_TIMEOUT // 60} 分钟还没跑完，我先停在这儿。"
+                    f"回一句「继续刚才的」我就接着做。")
+                if writer:
+                    writer.note(f"⏱ 等超时（{WAIT_TIMEOUT // 60} 分钟），本轮被截断")
+            elif not final_text:
+                if fb_err:
+                    # 别再只丢一个"（空回复）"给用户——把真正的失败原因说出来。
+                    detail = error_summary(run.get("message"))
+                    final_text = (f"⚠️ 这一轮没能回复：{fb_err}。\n"
+                                  f"主模型报错：{detail}\n"
+                                  f"可以用 `/model` 手动换一个模型后重发。")
+                elif run.get("stale"):
+                    final_text = ("⚠️ 模型没有产生任何回复（会话直接结束）。"
+                                  "可以用 `/model` 换一个模型后重发。")
+                else:
+                    final_text = "🛑 已按你的要求中断。" if interrupted else "（空回复）"
             # v2 卡片会把超长回答分片成多个 block，不再粗暴截断丢内容；
             # v1（SDK 卡片，总量硬上限 10KB）仍然要截断。
             v2_mode = bool(writer and getattr(writer, "passthrough_markdown", False))
@@ -3526,6 +3776,8 @@ class AgentTurn:
             final_status = "✅ 完成"
             if interrupted:
                 final_status = "🛑 已中断"
+            elif timed_out:
+                final_status = "⏱ 已截断"
             elif finish == "error":
                 final_status = "❌ 执行失败"
             footer = render_footer(final_parts, elapsed=elapsed, model=model_id,

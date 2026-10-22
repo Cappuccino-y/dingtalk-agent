@@ -256,6 +256,117 @@ class _Msg:
         self.robot_code = r.get("robot_code", "")
 
 
+def _mark_pushed(pids) -> None:
+    """记一下每条提案最近一次推卡的时间（控制"再问一次"的间隔）。"""
+    for pid in pids or []:
+        p = ms.load_proposal(pid)
+        if not p:
+            continue
+        p["card_pushed_ts"] = time.time()
+        p["card_pushed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        with open(ms.proposal_path(pid), "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(p, fh, ensure_ascii=False, indent=2)
+
+
+# 上一轮没批的提案，隔多久再问一次
+REASK_HOURS = 6
+
+
+def _pending_for_reask() -> list[tuple[str, dict]]:
+    """还挂着 pending、但上次推卡已经超过 REASK_HOURS 的提案 → 这一轮再问一次。
+
+    "稍后再说"（defer）现在**不冻结**提案（状态仍是 pending），
+    所以必须有个"再问"的机制，否则它们永远没人管。
+    """
+    out = []
+    now = time.time()
+    for p in ms.list_proposals("pending"):
+        ts = p.get("card_pushed_ts")
+        if isinstance(ts, (int, float)) and (now - ts) < REASK_HOURS * 3600:
+            continue
+        pid = p.get("id") or ""
+        if pid:
+            out.append((pid, p))
+    return out
+
+
+def _push_cards(new_items: list[tuple[str, dict]]) -> int:
+    """推审批卡：新提案 + 上一轮没批、放凉超过 REASK_HOURS 的老提案。
+
+    一律合成**一张**批量卡（一条提案一个下拉），超过 4 条分批推。
+    """
+    items = list(new_items or [])
+    fresh = {pid for pid, _ in items}
+    for pid, p in _pending_for_reask():
+        if pid not in fresh:
+            items.append((pid, p))
+    if not items:
+        return 0
+    CHUNK = 4
+    n = 0
+    for i in range(0, len(items), CHUNK):
+        if push_approval_batch_card(items[i:i + CHUNK]):
+            n += 1
+    return n
+
+
+def push_approval_batch_card(items: list[tuple[str, dict]]) -> bool:
+    """推**一张**批量审批卡：一条提案一个选项，一次提交全部结算。
+
+    为什么不再一条提案一张卡（2026-10-22 改）：
+    - 手机上 3 张卡要分别点开、分别提交，用户得记住"还剩几张没批"；
+    - 更糟的是钉钉在卡片渲染时会回调一次 fromConfig 事件，
+      老逻辑把它当成"用户作答"，于是在用户还没碰第二张卡的时候，
+      第二张卡就被判成"❓ 没看懂你的选择"并收尾 —— 提案其实还挂着。
+    合成一张卡以后：只推一次、只收一次回调，也没有"哪张卡被提前判死"的问题。
+
+    items: [(pid, prop), ...]，顺序 = 表单域顺序（p0 / p1 / ...）。
+    question_id 编码全部 pid（无状态、可跨进程）：evolve:batch:<pid1>,<pid2>
+    """
+    if not items:
+        return False
+    r = _recipient()
+    if not r or not r.get("conversation_id"):
+        print("[evolve] 没有收件人信息，跳过推送", file=sys.stderr)
+        return False
+    try:
+        from tools import card_v2
+        if not getattr(card_v2, "ASK_CARD_ENABLED", False):
+            print("[evolve] ASK 卡片未启用，跳过推送", file=sys.stderr)
+            return False
+        opts = [{"label": "批准", "value": "approve"},
+                {"label": "驳回", "value": "reject"},
+                {"label": "稍后再说", "value": "defer"}]
+        fields = []
+        desc_lines = []
+        for i, (pid, prop) in enumerate(items):
+            f = card_v2.ask_field("p%d" % i, "%d. %s" % (i + 1, (prop.get("title") or "")[:18]), opts)
+            if not f:
+                continue
+            fields.append(f)
+            desc_lines.append(
+                "**%d. %s**\n类型: %s ｜ 目标: %s\n依据: %s\n风险: %s\n%s"
+                % (i + 1, (prop.get("title") or "")[:40], prop.get("type", "-"),
+                   prop.get("scope", "global"), (prop.get("evidence") or "-")[:120],
+                   (prop.get("risk") or "-")[:120], (prop.get("body") or "")[:220]))
+        if not fields:
+            return False
+        pids = [pid for pid, _ in items][:len(fields)]
+        desc = ("以下 %d 条提案，请逐条选择后一次性提交：\n\n%s"
+                % (len(fields), "\n\n".join(desc_lines)))
+        card = card_v2.AskCard(_Msg(r), "evolve:batch:" + ",".join(pids),
+                               title="改进提案 · %d 条待批" % len(fields),
+                               desc=desc, fields=fields, submit_text="提交决定")
+        ok = card.create()
+        _mark_pushed(pids)
+        print("[evolve] 批量审批卡已投递 n=%d pids=%s outTrackId=%s ok=%s"
+              % (len(fields), ",".join(pids), card.out_track_id, ok))
+        return ok
+    except Exception as e:  # noqa: BLE001
+        print(f"[evolve] 批量审批卡投递失败: {e}", file=sys.stderr)
+        return False
+
+
 def push_approval_card(pid: str, prop: dict) -> bool:
     """推审批卡。用 ASK 卡片（form SELECT），question_id 里编码提案 id —— 无状态、可跨进程。"""
     r = _recipient()
@@ -363,6 +474,9 @@ def main() -> int:
     if not props:
         ms.append_journal("evolve", "本次扫描没有值得提的提案",
                           journal_entries=len(ev["journal"]))
+        # 就算这轮没新提案，上一轮没批的（"稍后再说"→ 仍是 pending）也该再问一次
+        if not args.no_push:
+            _push_cards([])
         return 0
 
     if args.dry_run:
@@ -370,6 +484,7 @@ def main() -> int:
         return 0
 
     saved: list[str] = []
+    batch_items: list[tuple[str, dict]] = []
     skipped = 0
     for p in props:
         # ---- 去重闸门（确定性，在推卡之前就拦掉）----
@@ -420,8 +535,12 @@ def main() -> int:
         p["id"] = pid
         saved.append(pid)
         print(f"[evolve] 提案已存 {pid}: {p.get('title', '')[:50]}")
-        if not args.no_push:
-            push_approval_card(pid, p)
+        batch_items.append((pid, p))
+
+    # 一次性推**一张**批量审批卡（2026-10-22 改：原来一条提案一张卡）。
+    # 超过 4 条就分批推（表单域太多手机上不好点），每批仍是一次提交结算一批。
+    if batch_items and not args.no_push:
+        _push_cards(batch_items)
 
     if saved:
         ms.append_journal("evolve", f"扫描完成，提出 {len(saved)} 条提案，等待用户审批",

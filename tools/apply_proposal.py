@@ -199,16 +199,21 @@ def reject(pid: str, note: str = "") -> tuple[bool, str]:
 
 
 def defer(pid: str) -> tuple[bool, str]:
+    """暂缓：**不冻结**这条提案 —— status 仍是 pending，还能被批准/驳回。
+
+    2026-10-22 改：原来把 status 改成 "deferred"，而 approve() 只认 pending，
+    于是"稍后再说"等于永久作废（再也没人能批，也没人再推卡）。
+    """
     p = ms.load_proposal(pid)
     if not p:
         return False, f"提案不存在: {pid}"
-    p["status"] = "deferred"
+    p["defer_count"] = int(p.get("defer_count") or 0) + 1
     p["deferred_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     with open(ms.proposal_path(pid), "w", encoding="utf-8", newline="\n") as fh:
         json.dump(p, fh, ensure_ascii=False, indent=2)
     ms.append_journal("proposal_deferred", f"提案暂缓: {p.get('title', '')}",
                       proposal=pid)
-    return True, "已标记为暂缓（状态不变，仍是 pending）"
+    return True, "已暂缓（仍是待审批，下一轮会再问一次）"
 
 
 def main() -> int:

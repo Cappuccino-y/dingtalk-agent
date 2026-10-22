@@ -1,0 +1,19 @@
+{
+  "type": "memory",
+  "title": "IC Monitor 应纳入 Bot 启动后自动运行与发送链路",
+  "scope": "project:dingtalk-agent",
+  "category": "decision",
+  "confidence": "high",
+  "body": "触发条件: dingtalk-agent 启动，或 IC Monitor 被接入 Bot 作业体系。\n动作: 将 IC Monitor 纳入 Bot 启动后的自动运行流程，执行结果通过 Bot 的通知链路发送。\n适用范围: dingtalk-agent 自身的 IC Monitor 集成。",
+  "evidence": "看下内容 可以的话把这个监控纳入本 bot 启动后自动运行发送的体系里吧",
+  "supersedes": "",
+  "risk": "若与既有的定时触发重叠，可能出现重复执行或重复推送。",
+  "expected_gain": "机器人启动后即可按统一流程自动运行 IC Monitor 并发送结果，无需额外手动触发。",
+  "source": "evolve",
+  "proposed_by": "MiniMax-M3.1-Flash",
+  "id": "prop_20261022-030301_d5de",
+  "created_at": "2026-10-21T19:03:01Z",
+  "status": "rejected",
+  "decided_at": "2026-10-21T19:03:54Z",
+  "decision_note": "用户在钉钉审批卡上驳回"
+}

@@ -243,6 +243,16 @@
 | 2026-10-20 | 流式改为**可读性优先**：`TAIL_WINDOW=0` 推全量正文 | `.env` |
 | 2026-10-20 | **抽成本独立仓库 `dingtalk-agent`**（范围：交互机器人） | 全仓库 |
 | 2026-10-20 | **定时作业也搬进来**：`premarket` / `ic_monitor` / `ic_weekly` 三个脚本 + `market_chart` + `akshare_helper`，调度器切到本仓库跑 | `jobs/`、`scheduler/registry.py` |
+| 2026-10-21 | **看门狗存活判定加身份校验**：`Test-PidFileAlive` 除 pid 外还要求进程是 python 且命令行匹配（`listen\.py` / `scheduler`）。起因：重启后 `scheduler.pid=21268` 被系统复用给 conhost.exe，看门狗报「已存活」，当天 08:00 / 08:50 两个作业全没跑 | `C:\Users\yydyy77\bin\dingtalk-bot-autostart.ps1` |
+| 2026-10-21 | **IC 通知改走本机器人 1:1**（⚠️ **10-22 已改回 py 小助手群 webhook，见下条**）：`ic_monitor` 不再用 `tools/notifycation.send_dingtalk_message`（那是「交易讯息更新」群另一个自定义机器人的 webhook），改用 `tools.dingtalk_push.push_markdown`，与盘前早报同一通道；失败只记日志不回落群 | `jobs/ic_signal_monitor.py` |
+| 2026-10-21 | **群 webhook 凭据移出代码**：`notifycation.py` 顶部的 webhook / 加签 secret 改为运行时从 `DINGTALK_WEBHOOK` / `DINGTALK_SECRET`（环境变量或仓库根 `.env`）读取，缺失或格式不对直接拒绝发送。旧 token 已随首个提交进 git 历史，需要在群里重置 | `tools/notifycation.py`、`.env.example` |
+| 2026-10-22 | **`evolve` 改到 09:20 + 720 分钟补跑窗口**：这台机器每天 08:40 才开机，凌晨 03:00 的 60 分钟窗口永远错过（10-21 全天没跑；10-22 03:00 那次是机器没关时侥幸跑到的）。窗口拉到 12 小时后 = "当天机器开着就会跑一次"，开机晚了也开机即补跑 | `scheduler/registry.py` |
+| 2026-10-22 | **兜底模型切换修好**：① `FALLBACK_MODEL` 的 id 从 `MiniMax-M3.1-Flash-Preview` 改成真实存在的 `MiniMax-M3.1-Flash`（切换接口不校验 id，写错的 id 也返回 204"成功"，但会话压根不产出消息 → 用户只看到"已切到"+"空回复"）；② 切换前比对 `/api/model` 清单、切后回读 `session.model` 校验，两处任一不过就如实报错；③ 新增 `stale` 判定，识别"本轮一条 assistant 消息都没产生"；④ 空回复时把真实错误（`provider.quota` 等）显示出来，不再只丢"（空回复）" | `tools/opencode_bridge.py` |
+| 2026-10-22 | **IC 监控退出码 1 修好**：`print(SIGNAL_TRIGGERED:...)` 在 Windows 的 GBK stdout 下编不出 emoji（🚨）→ `UnicodeEncodeError` → 整轮判 failed（**推送其实已经成功**）。改为一律 `ensure_ascii=True`（纯 ASCII，下游按什么编码解都不会错）+ 模块入口把 stdout/stderr 统一切 UTF-8 `errors="replace"` | `jobs/ic_signal_monitor.py` |
+| 2026-10-22 | **IC 通知通道改回 py 小助手**：上一条把 `ic_monitor` 的推送换成了本机器人 1:1（`tools/dingtalk_push`），用户明确 IC 信号的推送是人家 notify 那条链路负责的（py 小助手群 webhook）。改回 `tools/notifycation.send_dingtalk_message`，编码兜底保留 | `jobs/ic_signal_monitor.py` |
+| 2026-10-22 | **单轮等待上限 900 → 1800 秒 + 超时不再装作答完**：`WAIT_TIMEOUT` 从 900 提到 1800（900s 太短，长任务那轮会被腰斩）；新增 `timed_out` 标记 —— 等超时时（`wait_idle` 抛 ReadTimeout）不再把半截正文当最终回答，而是如实标「⏱ 已截断」+ 给出「继续刚才的」入口，卡片状态也不再显示「✅ 完成」 | `tools/opencode_bridge.py` |
+| 2026-10-22 | **evolve 审批卡：一张卡批所有提案 + 拦掉非作答回调**：① 原来一条提案推一张卡（手机要分别点开分别提交），现在合成**一张批量卡**（一条提案一个 SELECT 域 `p0/p1/...`，`question_id` 编成 `evolve:batch:<pid1>,<pid2>`），一次提交全部结算，超过 4 条分批推；② 钉钉在卡片渲染时会回调一次 `params={"fromConfig": ""}`，老逻辑把它当成用户作答，于是**用户还没碰第二张卡**它就被判成「❓ 没看懂你的选择」并收尾（提案其实还挂着）—— 现在非作答事件一律忽略、不动卡片 | `tools/opencode_bridge.py`、`tools/evolve.py` |
+| 2026-10-22 | **审批卡不再"读不懂就收尾"（第二次修同一个坑）**：上一条只拦了 fromConfig，但**任何**读不出决定的回调（字段名对不上、值是中文、用户取消时）都会走同一条"❓ 没看懂你的选择 → `_finish(CANCELLED)`"分支 —— 卡片一收尾，用户就再也没法在这张卡上作答，提案变孤儿（用户看到的正是"已取消 ❓ 没看懂你的选择"）。现在：① 读不懂决定**不收尾**，把 `card_status` 退回 `pending`（表单重新可提交）+ 提示重选；② 决定值归一化（批准/驳回/稍后再说 等中文写法也认）；③ 批量卡没选的提案**保持 pending** 并立刻重推一张卡；④ `defer`（稍后再说/取消）**不再冻结**提案 —— 原来把 status 改成 `deferred`，而 `approve()` 只认 `pending`，等于"稍后再说"= 永久作废；现在仍是 pending，下一轮 evolve 推卡时（间隔 ≥6h）会再问一次。⚠️ 教训：**改完代码必须等重启生效再让用户点**，10-22 那次用户在新代码上线前 85 秒点了旧卡，被旧逻辑打死 | `tools/opencode_bridge.py`、`tools/evolve.py`、`tools/apply_proposal.py` |
 
 ---
 

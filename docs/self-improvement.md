@@ -61,13 +61,20 @@ tools/
    │
    ├─ 提案落 memory/proposals/<id>.json
    │
-   └─ 推钉钉审批卡（ASK 卡片，question_id 里编了提案 id）
+   └─ 推钉钉审批卡（ASK 卡片，**一张卡批所有提案**：question_id 编成
+      `evolve:batch:<pid1>,<pid2>`，一条提案一个下拉 p0/p1/...）
 
-[你在钉钉点「批准」]
+[你在钉钉点「提交决定」]
    │
    ├─ bot 进程收到回调 → 按提案 id 读 JSON（无状态，bot 重启也不影响）
    ├─ apply_proposal.py：校验白名单 → 写入门禁 → 追加记忆 → git commit
    └─ 回写卡片状态（已批准 / 已驳回 / 已暂缓）
+
+【两条铁律】
+- 读不懂你的决定时**绝不收尾卡片**（收尾 = 你再也没法在这张卡上作答，
+  提案变孤儿）：把 card_status 退回 pending，让你再选一次。
+- 「稍后再说」**不冻结**提案（status 仍是 pending，下一轮会再问一次），
+  没选的提案当场重推一张卡。
 ```
 
 手动触发：
