@@ -100,3 +100,20 @@ source.agentIds: evolve, user-approved
 动作: 主动展示当前状态或阶段性进度；遇到工具中断、流程卡顿或等待较久时立即反馈，不能让用户看到长时间静默。
 适用范围: dingtalk-agent 的处理中状态展示与任务执行流程。
 
+---
+memoryId: mem_3aa1461f_39284
+timestamp: 2026-10-22T03:21:24Z
+scope: project:dingtalk-agent
+category: gotcha
+title: autoworkflow.py 视为已知可用实现，接入监控时不得擅改
+tags: [evolve]
+confidence: high
+trust: self
+source.messageIds: proposal:prop_20261022-092339_dca9
+source.agentIds: evolve, user-approved
+---
+
+触发条件: 为 DingTalk Agent 调整监控、后台作业、启动链路或架构。
+动作: 只处理该项目自身代码；不要擅自修改 autoworkflow.py，将其视为已知可用的既有实现，除非用户后续明确要求。
+适用范围: dingtalk-agent 的代码维护及与 MainToy/autoworkflow.py 的协作边界。
+

@@ -1,0 +1,20 @@
+{
+  "type": "memory",
+  "title": "autoworkflow.py 视为已知可用实现，接入监控时不得擅改",
+  "scope": "project:dingtalk-agent",
+  "category": "gotcha",
+  "confidence": "high",
+  "body": "触发条件: 为 DingTalk Agent 调整监控、后台作业、启动链路或架构。\n动作: 只处理该项目自身代码；不要擅自修改 autoworkflow.py，将其视为已知可用的既有实现，除非用户后续明确要求。\n适用范围: dingtalk-agent 的代码维护及与 MainToy/autoworkflow.py 的协作边界。",
+  "evidence": "不要管 autoworkflow 的 只管你自己的\n我觉得你还是不要改了 他本来就是好的",
+  "supersedes": "",
+  "risk": "若 autoworkflow.py 后续确有独立缺陷，需要用户明确要求后才能修正。",
+  "expected_gain": "避免因接入或重构误改原本可用的启动逻辑，减少无关变更和回归风险。",
+  "source": "evolve",
+  "proposed_by": "MiniMax-M3.1-Flash",
+  "id": "prop_20261022-092339_dca9",
+  "created_at": "2026-10-22T01:23:39Z",
+  "status": "approved",
+  "card_pushed_ts": 1792639267.2769973,
+  "card_pushed_at": "2026-10-22T03:21:07Z",
+  "decided_at": "2026-10-22T03:21:24Z"
+}
