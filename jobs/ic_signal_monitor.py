@@ -41,8 +41,51 @@ for _p in (REPO, HERE):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-# 钉钉通知
+# 钉钉通知：走「交易讯息更新」群的 py 小助手 webhook（tools.notifycation）。
+# 2026-10-22 用户明确：IC 信号的推送是人家 notify 那条链路负责的，
+# 由 py 小助手推，不要换成 dingtalk-agent 机器人的 1:1 通道。
 from tools.notifycation import send_dingtalk_message
+
+# ---------------------------------------------------------------- 编码兜底
+# Windows 上 stdout/stderr 默认是 GBK(cp936)：emoji（🚨）**根本编不出去**，
+# print 一旦带上 emoji 就会抛 UnicodeEncodeError → 整轮退出码 1
+# （推送其实早成功了，却白被判成 failed，2026-10-22 08:50 就是这么炸的）。
+# 这里统一切到 UTF-8 且 errors="replace"，保证再怪异的字符也不会抛异常。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def emit_signal(payload: dict) -> None:
+    """把信号打到 stdout，供 autoworkflow 捕获。
+
+    **必须 ensure_ascii=True**：转义成 \\uXXXX 后 stdout 全是 ASCII 字节，
+    下游无论按 GBK 还是 UTF-8 解码都不会乱，json.loads 拿到的对象完全一致；
+    直接输出中文/emoji 则会被编码问题打断整轮流程。
+    """
+    try:
+        print(f"SIGNAL_TRIGGERED:{json.dumps(payload, ensure_ascii=True)}")
+        sys.stdout.flush()
+    except Exception as e:  # noqa: BLE001
+        logging.error("输出 SIGNAL_TRIGGERED 失败：%s", e)
+
+
+def push_bot_message(text: str, title: str = "金融技术提醒") -> bool:
+    """走 py 小助手群 webhook（notifycation）发 markdown。
+
+    保留旧名只为调用点少改；实质就是 notifycation.send_dingtalk_message。
+    """
+    try:
+        ok = bool(send_dingtalk_message(text))
+    except Exception as e:  # noqa: BLE001
+        logging.error(f"群 webhook 推送异常（{title}）：{e}")
+        return False
+    if not ok:
+        logging.error(f"群 webhook 推送失败（{title}）")
+    return ok
+
 
 # 运行期产物放 var/ic/（.gitignore 已忽略 var/），不污染源码目录
 VAR_DIR = REPO / "var" / "ic"
@@ -412,8 +455,10 @@ def notify_dingtalk(result: dict, last_date: str = None):
         title = "🟠 顶部预警信号触发"
 
     try:
-        send_dingtalk_message(msg)
-        logging.info(f"钉钉通知已发送（{result['date']} {title}）")
+        if push_bot_message(msg, title=title):
+            logging.info(f"钉钉通知已发送（{result['date']} {title}）")
+        else:
+            logging.error(f"钉钉通知发送失败（{result['date']} {title}）")
     except Exception as e:
         logging.error(f"钉钉通知失败: {e}")
 
@@ -460,8 +505,10 @@ def notify_dingtalk_heartbeat(bottom: dict, top: dict):
     if stale_note:
         lines.append(stale_note)
     try:
-        send_dingtalk_message("\n".join(lines))
-        logging.info(f"钉钉心跳已发送（{bottom['date']}）")
+        if push_bot_message("\n".join(lines), title="IC 信号心跳播报"):
+            logging.info(f"钉钉心跳已发送（{bottom['date']}）")
+        else:
+            logging.error(f"钉钉心跳发送失败（{bottom['date']}）")
     except Exception as e:
         logging.error(f"钉钉心跳失败: {e}")
 
@@ -476,8 +523,10 @@ def notify_recheck(result: dict, days_ago: int):
         "**注意**: 事后修正信号，当日实时未抓取，仅作历史回溯参考",
     ]
     try:
-        send_dingtalk_message("\n".join(lines))
-        logging.info(f"事后修正触发已通知: {result['date']} ({days_ago}天前)")
+        if push_bot_message("\n".join(lines), title="IC 事后修正触发"):
+            logging.info(f"事后修正触发已通知: {result['date']} ({days_ago}天前)")
+        else:
+            logging.error(f"事后修正触发通知失败: {result['date']}")
     except Exception as e:
         logging.error(f"事后修正通知失败: {e}")
 
@@ -577,8 +626,7 @@ def run_once(force: bool = False, dry_run: bool = False, heartbeat: bool = True)
         else:
             payload = write_alert(bottom, last_date)
             notify_dingtalk(bottom, last_date)
-            print(f"SIGNAL_TRIGGERED:{json.dumps(payload, ensure_ascii=False)}")
-            sys.stdout.flush()
+            emit_signal(payload)
             result["sent"].append("bottom")
     # 顶部信号（预警/确认）
     elif top["triggered"] and (force or not top_done):
@@ -590,8 +638,7 @@ def run_once(force: bool = False, dry_run: bool = False, heartbeat: bool = True)
         else:
             payload = write_alert(top, last_date)
             notify_dingtalk(top, last_date)
-            print(f"SIGNAL_TRIGGERED:{json.dumps(payload, ensure_ascii=False)}")
-            sys.stdout.flush()
+            emit_signal(payload)
             result["sent"].append(top["type"])
 
     # 没发信号 → 每日心跳（同一天只发一次；今天已有信号就不再补心跳）
@@ -678,8 +725,7 @@ def main():
                 payload = write_alert(bottom, last_date)
                 logging.info(f"🚨 抄底触发！{payload['message']}")
                 notify_dingtalk(bottom, last_date)
-                print(f"SIGNAL_TRIGGERED:{json.dumps(payload, ensure_ascii=False)}")
-                sys.stdout.flush()
+                emit_signal(payload)
                 triggered_any = True
 
             if top["triggered"] and not already_alerted(top["date"], top["type"]):
@@ -687,8 +733,7 @@ def main():
                 payload = write_alert(top, last_date)
                 logging.info(f"{'🔴' if top['confirmed'] else '⚠️'} 顶部触发！{payload['message']}")
                 notify_dingtalk(top, last_date)
-                print(f"SIGNAL_TRIGGERED:{json.dumps(payload, ensure_ascii=False)}")
-                sys.stdout.flush()
+                emit_signal(payload)
                 triggered_any = True
 
             if not triggered_any and not status_written:
@@ -721,6 +766,6 @@ if __name__ == "__main__":
     if args.once:
         res = run_once(force=args.force, dry_run=args.dry_run,
                        heartbeat=not args.triggers_only)
-        print(json.dumps(res, ensure_ascii=False))
+        print(json.dumps(res, ensure_ascii=True))
     else:
         main()

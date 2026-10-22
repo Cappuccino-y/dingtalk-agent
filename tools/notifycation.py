@@ -11,9 +11,10 @@ import base64
 
 logger = logging.getLogger(__name__)
 
-WEBHOOK = "https://oapi.dingtalk.com/robot/send?access_token=9323cbca8c62c807654a4d134d3ba36e5deb8b0de75fa418b4b0fed3a8bed6c8"
-SECRET = "SEC482c404e44ae1f4d5ed3deb10786d4fdbbea74a9e9f0f533e2b5093bc0fff66b"
-ROBOT_ACCESS_TOKEN = WEBHOOK.split("access_token=", 1)[1]
+# 群机器人 webhook / 加签密钥一律从环境变量或仓库根 .env 读取
+# （DINGTALK_WEBHOOK / DINGTALK_SECRET）。
+# 2026-10-21：原来这两个值是硬编码的，连同一个群的访问 token 一起提交进了 git，
+# 谁 clone 都能往群里发消息。现在代码里不再保存任何凭据。
 MEDIA_UPLOAD_URL = "https://oapi.dingtalk.com/media/upload"
 DINGTALK_OPENAPI_ENDPOINT = "https://api.dingtalk.com"
 
@@ -34,18 +35,38 @@ def _load_recipient() -> dict:
         return {}
 
 
-def _signed_webhook_url() -> str:
-    """构造带时间戳+签名的 webhook URL（钉钉机器人加签方式）"""
+def _signed_webhook_url() -> str | None:
+    """构造带时间戳+签名的 webhook URL（钉钉机器人加签方式）
+
+    webhook / secret 只从环境变量或仓库根 .env 读取；没配就返回 None，
+    调用方据此放弃发送并记日志，绝不把消息发到别处。
+    """
+    webhook = _load_env_key("DINGTALK_WEBHOOK")
+    if not webhook:
+        logger.error("未配置 DINGTALK_WEBHOOK（环境变量或 .env），无法发送群消息")
+        return None
+    if not webhook.startswith("https://oapi.dingtalk.com/robot/send"):
+        logger.error("DINGTALK_WEBHOOK 格式不对，应形如 https://oapi.dingtalk.com/robot/send?access_token=xxx")
+        return None
+
+    secret = _load_env_key("DINGTALK_SECRET")
+    if not secret:
+        # 没配加签密钥的机器人也是合法配置（安全设置里选了「自定义关键词」等情况）
+        return webhook
+
     timestamp = str(round(time.time() * 1000))
-    sign_str = f"{timestamp}\n{SECRET}"
-    hmac_code = hmac.new(SECRET.encode(), sign_str.encode(), digestmod=hashlib.sha256).digest()
+    sign_str = f"{timestamp}\n{secret}"
+    hmac_code = hmac.new(secret.encode(), sign_str.encode(), digestmod=hashlib.sha256).digest()
     sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
-    return f"{WEBHOOK}&timestamp={timestamp}&sign={sign}"
+    sep = "&" if "?" in webhook else "?"
+    return f"{webhook}{sep}timestamp={timestamp}&sign={sign}"
 
 
 def send_dingtalk_message(content):
-    """发送钉钉机器人Markdown消息"""
+    """发送钉钉群机器人Markdown消息（凭据来自 DINGTALK_WEBHOOK / DINGTALK_SECRET）"""
     url = _signed_webhook_url()
+    if not url:
+        return False
 
     headers = {"Content-Type": "application/json"}
     data = {
@@ -72,7 +93,7 @@ def send_dingtalk_message(content):
 
 
 def _load_env_key(name: str):
-    """从环境变量读取，失败时回退到 MainToy/.env（支持 `KEY="value"` 格式）"""
+    """从环境变量读取，失败时回退到仓库根 .env（支持 `KEY="value"` 格式）"""
     val = os.getenv(name)
     if val:
         return val.strip().strip('"').strip("'")
@@ -100,7 +121,7 @@ def _get_app_access_token():
     app_key = _load_env_key("APP_KEY")
     app_secret = _load_env_key("APP_SECRET")
     if not app_key or not app_secret:
-        logger.error("未配置 APP_KEY/APP_SECRET（环境变量或 MainToy/.env），无法上传图片")
+        logger.error("未配置 APP_KEY/APP_SECRET（环境变量或 .env），无法获取企业应用凭据")
         return None
     try:
         r = requests.post(
