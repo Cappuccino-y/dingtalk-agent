@@ -1,0 +1,18 @@
+{
+  "type": "memory",
+  "title": "长耗时处理期间必须主动展示状态，避免再次静默",
+  "scope": "project:dingtalk-agent",
+  "category": "gotcha",
+  "confidence": "high",
+  "body": "触发条件: 机器人正在思考、调用工具或执行多步骤流程，尚未给出最终回复。\n动作: 主动展示当前状态或阶段性进度；遇到工具中断、流程卡顿或等待较久时立即反馈，不能让用户看到长时间静默。\n适用范围: dingtalk-agent 的处理中状态展示与任务执行流程。",
+  "evidence": "你在思考和流程处理上的显示有可以优化的吗？\n全部修复\n又静默了？？",
+  "supersedes": "",
+  "risk": "状态提示过密可能打断阅读，并增加无效消息。",
+  "expected_gain": "用户能随时判断机器人仍在工作，减少因静默产生的误解和重复催促。",
+  "source": "evolve",
+  "proposed_by": "MiniMax-M3.1-Flash",
+  "id": "prop_20261022-092337_9bf1",
+  "created_at": "2026-10-22T01:23:37Z",
+  "status": "approved",
+  "decided_at": "2026-10-22T01:32:03Z"
+}

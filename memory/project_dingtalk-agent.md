@@ -83,3 +83,20 @@ source.agentIds: evolve, user-approved
 动作: 同步更新项目架构文档中的架构说明、改动史和相关常量，并在 agent 维护约定中保留持续维护要求。
 适用范围: dingtalk-agent 项目。
 
+---
+memoryId: mem_3647a4f3_32723
+timestamp: 2026-10-22T01:32:03Z
+scope: project:dingtalk-agent
+category: gotcha
+title: 长耗时处理期间必须主动展示状态，避免再次静默
+tags: [evolve]
+confidence: high
+trust: self
+source.messageIds: proposal:prop_20261022-092337_9bf1
+source.agentIds: evolve, user-approved
+---
+
+触发条件: 机器人正在思考、调用工具或执行多步骤流程，尚未给出最终回复。
+动作: 主动展示当前状态或阶段性进度；遇到工具中断、流程卡顿或等待较久时立即反馈，不能让用户看到长时间静默。
+适用范围: dingtalk-agent 的处理中状态展示与任务执行流程。
+
