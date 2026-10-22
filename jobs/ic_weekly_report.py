@@ -1,5 +1,14 @@
 """
-IC 抄底信号周报（各 ETF 历史触发明细图表）
+IC 抄底信号周报（各 ETF 历史触发明细图表）—— **本副本已停用（2026-10-22）**
+
+周报已交回 MainToy 那条链：`MainToy\autorun\autoworkflow.py` 拉起
+`MainToy\finanCalc\ic_signal_monitor.py`，周一 08:50 在链内生成周报 PNG
+（`MainToy\finanCalc\ic_weekly_report.py`），推送走 MainToy 侧 notify。
+本仓库只留**手动入口** `/周报`，指向同一份脚本（`IC_HOME`）→ 当日 PNG 幂等，不会重复发。
+
+⚠️ 不要单独跑这个文件：它写的是 `var/weekly_reports/` 下**另一套**输出目录，
+   和 MainToy 那条链不共享幂等状态 → 周报会被发两遍。
+
 - 三个指数: 上证50(50etf QVIX) / 沪深300(300etf QVIX) / 中证500(500etf QVIX)
 - 每个触发日列出: 触发指标 + 后60交易日窗口最高/最低(入场=次日开盘价, 高低点=盘中HIGH/LOW)
 - 最高点出现时间 = 相对入场日的自然日数

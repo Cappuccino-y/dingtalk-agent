@@ -6,7 +6,14 @@
 - 时间窗口 window_min 表示「错过之后还能补跑多久」，超出就不再补（避免半夜补一条早报）。
 
 occurrence 就是「这次该在哪一刻跑」，也是去重键：
-    2026-10-21T08:50   ← ic_monitor 在 10-21 的计划时刻
+    2026-10-21T08:00   ← premarket 在 10-21 的计划时刻
+
+**IC 监控（抄底/顶部信号）已交回 MainToy 那条链**（2026-10-22）：
+`MainToy\autorun\autoworkflow.py` 拉起 `MainToy\finanCalc\ic_signal_monitor.py`（常驻模式），
+推送走 MainToy\tools\notifycation.py（py 小助手群 webhook）—— 不经本机器人的 1:1 通道。
+所以本仓库的 ic_monitor / ic_weekly **不参与定时**（scheduled=False），只留手动入口：
+它们指向**同一份脚本、同一份状态/历史文件**（IC_HOME），所以手动跑和那条链共用去重，
+同一条信号只会被推一次，不会双推。
 """
 from __future__ import annotations
 
@@ -14,7 +21,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
 
-from .config import PYTHON, REPO
+from .config import IC_HOME, IC_SCRIPT, IC_WEEKLY_SCRIPT, PYTHON, REPO
 
 WEEKDAYS = (0, 1, 2, 3, 4)   # 周一~周五
 
@@ -32,6 +39,7 @@ class Job:
     retry_delay_s: int = 300             # 失败后隔多久再试
     notify_on_fail: bool = True          # 失败是否推钉钉
     manual_ok: bool = True               # 允许手动/聊天触发（定时之外的第二个入口）
+    scheduled: bool = True               # False = 只做手动入口，不参与定时（作业归别人管）
     aliases: tuple[str, ...] = ()        # 聊天快捷名，不含斜杠：/ic → ic_monitor
     cwd: str = field(default=REPO)
 
@@ -40,8 +48,8 @@ class Job:
         return "%Y-%m-%dT%H:%M"
 
 
-# 三个业务脚本已经全部搬进本仓库的 jobs/ 目录（2026-10-20），
-# 调度语义（时间点/窗口/重试/别名）与老仓库完全一致。
+# bot 自己的作业。IC 监控/周报 2026-10-22 起交回 MainToy 那条链（见模块头注释）：
+# 本仓库只保留**手动入口**（scheduled=False），定时由 autoworkflow 那条链负责。
 JOBS: list[Job] = [
     Job(
         id="premarket",
@@ -55,31 +63,42 @@ JOBS: list[Job] = [
         aliases=("早报", "premarket"),
         cwd=REPO,
     ),
+    # IC 信号监控：**只做手动入口**，定时由 MainToy\\autorun\\autoworkflow.py 负责。
+    # 两边跑的是同一份脚本、同一份状态/历史文件（IC_HOME），所以：
+    #   - 谁先跑谁推，状态文件保证当天只推一次（不会双推）；
+    #   - /ic 手动跑 = 立刻补一次判定，和那条链共用去重。
     Job(
         id="ic_monitor",
-        name="IC 信号监控",
-        argv=[PYTHON, os.path.join(REPO, "jobs", "ic_signal_monitor.py"),
-              "--once"],
+        name="IC 信号监控（手动）",
+        # --triggers-only：手动跑只补「真信号」，不发每日心跳——
+        # 心跳由 autoworkflow 那条链的常驻进程发，状态文件不共享，
+        # 两边都发就会在群里刷两条一样的日报。
+        argv=[PYTHON, IC_SCRIPT, "--once", "--triggers-only"],
         at=(8, 50),
         window_min=70,           # 8:50~10:00，和脚本原本的早盘窗口一致
         timeout_s=600,
         max_attempts=3,
         retry_delay_s=180,
+        scheduled=False,         # 不参与定时（定时归 autoworkflow 那条链）
+        notify_on_fail=False,    # IC 的事归那条链，失败不往本机器人 1:1 推卡
         aliases=("ic", "IC监控", "IC信号"),
-        cwd=REPO,
+        cwd=IC_HOME,
     ),
+    # IC 周报：同上，只留手动入口（周一 09:05 那次由 autoworkflow 那条链负责）。
     Job(
         id="ic_weekly",
-        name="IC 周报",
-        argv=[PYTHON, os.path.join(REPO, "jobs", "ic_weekly_report.py")],
+        name="IC 周报（手动）",
+        argv=[PYTHON, IC_WEEKLY_SCRIPT],
         at=(9, 5),               # 排在 IC 监控之后，用的是同一份收盘数据
         window_min=100,
         dow=(0,),                # 只在周一
         timeout_s=900,
         max_attempts=2,
         retry_delay_s=300,
+        scheduled=False,         # 不参与定时
+        notify_on_fail=False,
         aliases=("周报", "weekly"),
-        cwd=REPO,
+        cwd=IC_HOME,
     ),
     Job(
         id="evolve",
@@ -106,6 +125,8 @@ JOBS: list[Job] = [
 # --------------------------------------------------------------- 时间计算
 def occurrence_for(job: Job, now: datetime) -> datetime | None:
     """今天（含跨零点窗口的前一天）仍在窗口内的计划时刻；没有就 None。"""
+    if not job.scheduled:
+        return None          # 只做手动入口的作业，永不参与定时
     for day in (now.date(), now.date() - timedelta(days=1)):
         if job.dow is not None and day.weekday() not in job.dow:
             continue
@@ -117,6 +138,8 @@ def occurrence_for(job: Job, now: datetime) -> datetime | None:
 
 def next_due(job: Job, now: datetime) -> datetime | None:
     """下一次计划时刻（用于状态展示；不含窗口判断）。"""
+    if not job.scheduled:
+        return None
     for offset in range(0, 8):
         day = now.date() + timedelta(days=offset)
         if job.dow is not None and day.weekday() not in job.dow:
@@ -129,6 +152,8 @@ def next_due(job: Job, now: datetime) -> datetime | None:
 
 def schedule_text(job: Job) -> str:
     """人类可读的时间表。"""
+    if not job.scheduled:
+        return "仅手动触发（不参与定时）"
     hh, mm = job.at
     dow = "每天" if job.dow is None else (
         "周一~周五" if tuple(job.dow) == WEEKDAYS else

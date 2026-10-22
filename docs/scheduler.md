@@ -33,16 +33,21 @@
                                                           │ 到点 spawn（子进程）
                              ┌────────────────────────────┼────────────────────────┐
                              ▼                            ▼                        ▼
-                    premarket 08:00              ic_monitor 08:50           ic_weekly 周一 09:05
-                    （盘前早报，跑完就退）        （IC 信号，--once）        （周报 PNG）
-                              │                            │                        │
-                              └─────► evolve 09:20（窗口 12 小时）◄───┘
-                                    （知识/行为改进扫描；机器 08:40 才开机，
-                                      窗口拉长 = 当天开着就一定跑）
-                             │                            │                        │
+                    premarket 08:00              evolve 09:20（窗口 12 小时）    ic_monitor /ic_weekly
+                    （盘前早报，跑完就退）        （知识/行为改进扫描；机器      （仅手动入口：IC 归
+                             │                    08:40 才开机，窗口拉长 =      MainToy\autorun\autoworkflow
+                             │                    当天开着就一定跑）            那条链管，见下）
+                             │                             │                        │
                              └──────────► runs 表（SQLite）：状态/次数/耗时/日志尾巴 ┘
                                                   │
                                     失败 → notify.py（按 key 去重，只发一次）
+
+> **IC 监控（抄底/顶部信号 + 周报）不归本调度器管**（2026-10-22 起）：
+> 定时由 `MainToy\autorun\autoworkflow.py` 拉起 `MainToy\finanCalc\ic_signal_monitor.py`，
+> 推送走 MainToy 侧的 notify（py 小助手群 webhook）。
+> 本仓库的 `ic_monitor` / `ic_weekly` 只留**手动入口**（`/ic`、`/周报`），
+> 并且指向**同一份脚本、同一份状态/历史文件**（`IC_HOME`）——
+> 手动跑和那条链共用去重，同一条信号只会被推一次。
 ```
 
 **两个常驻进程**：bot（钉钉连接）和 scheduler（时间表）。
@@ -84,25 +89,33 @@ scheduler/
 ### 作业脚本现在在哪
 
 2026-10-20 机器人本体、调度器**和三个业务脚本**都搬到了本仓库，
-`registry.py` 里的 `argv` / `cwd` 全部指向本仓库：
+`registry.py` 里的 `argv` / `cwd` 指向各自的实现：
 
-| 作业 | 脚本 | 依赖（也都在本仓库） |
+| 作业 | 脚本 | 说明 |
 |---|---|---|
-| `premarket` | `jobs/premarket_push.py` | `tools/opencode_bridge.py`、`tools/dingtalk_push.py`、`tools/market_chart.py` |
-| `ic_monitor` | `jobs/ic_signal_monitor.py` | `datalayer/akshare_helper.py`、`tools/notifycation.py` |
-| `ic_weekly` | `jobs/ic_weekly_report.py` | 同上 |
+| `premarket` | `jobs/premarket_push.py` | 依赖也都在本仓库：`tools/opencode_bridge.py`、`tools/dingtalk_push.py`、`tools/market_chart.py` |
+| `evolve` | `tools/evolve.py` | 同上 |
+| `ic_monitor` | `MainToy\finanCalc\ic_signal_monitor.py` | **仅手动**；IC 归 MainToy 那条链（`IC_HOME` 可改） |
+| `ic_weekly` | `MainToy\finanCalc\ic_weekly_report.py` | 同上 |
+
+> 2026-10-22：IC 监控/周报交回 MainToy 那条链（启动归 `autorun\autoworkflow.py`，
+> 推送归 MainToy 侧 notify = py 小助手群 webhook）。本仓库只留手动入口，
+> 指向**同一份脚本 + 同一份状态/历史**（`IC_HOME`）→ 两边共用去重，不会双推。
+> `jobs/ic_signal_monitor.py`、`jobs/ic_weekly_report.py` 两份副本**已停用**：
+> 它们写的是 `var/` 下另一套状态文件，单独跑会跟那条链各推一遍。
 
 运行期产物统一放 `var/`（`.gitignore` 已忽略）：
 
 | 路径 | 内容 | 原来在哪 |
 |---|---|---|
-| `var/ic/` | IC 信号、最新信号、历史、每日去重状态、运行日志 | `MainToy/finanCalc/` |
-| `var/weekly_reports/` | 周报 PNG | `MainToy/finanCalc/weekly_reports/` |
+| `var/ic/` | IC 信号、最新信号、历史、每日去重状态、运行日志（**已停用**，真数据在 MainToy 侧） | `MainToy/finanCalc/` |
+| `var/weekly_reports/` | 周报 PNG（**已停用**） | `MainToy/finanCalc/weekly_reports/` |
 | `bot/bridge_data/` | 早报会话映射 + 推送时间戳 | `MainToy/finanCalc/bridge_data/` |
 
 > 迁移时把老仓库的 `ic_latest_signal.json` / `ic_signal_history.json` /
 > `premarket_last_sent.json` 一起搬过来了，所以**去重状态没断**——
 > 迁移当天 IC 监控照常判定「今天已推过」而没重复推送。
+> IC 交回 MainToy 侧时，2026-10-21 那次抄底信号的历史也并了过去，换链后不会重推。
 
 > 顺带修掉一个老 bug：早报脚本原来把会话文件写到 `MainToy/finanCalc/bridge_data/`，
 > 而机器人（`bot/listen.py` 的 `BRIDGE_DATA_DIR`）读的是 `bot/bridge_data/`——

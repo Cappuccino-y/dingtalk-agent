@@ -215,8 +215,23 @@
 | 作业 | 时间 | 脚本 |
 |---|---|---|
 | `premarket` 盘前早报 | 每天 08:00（补跑 180 分钟） | `jobs/premarket_push.py` |
-| `ic_monitor` IC 信号监控 | 周一~周五 08:50（补跑 70 分钟） | `jobs/ic_signal_monitor.py` |
-| `ic_weekly` IC 周报 | 周一 09:05（补跑 100 分钟） | `jobs/ic_weekly_report.py` |
+| `evolve` 知识与行为改进扫描 | 每天 09:20（补跑 720 分钟） | `tools/evolve.py` |
+| `ic_monitor` IC 信号监控 | **仅手动**（`/ic`） | `MainToy\finanCalc\ic_signal_monitor.py`（IC 归那条链，见下） |
+| `ic_weekly` IC 周报 | **仅手动**（`/周报`） | `MainToy\finanCalc\ic_weekly_report.py` |
+
+**IC 监控（抄底/顶部信号 + 周报）2026-10-22 起交回 MainToy 那条链**：
+
+- **定时由 `MainToy\autorun\autoworkflow.py` 拉起**（它开机 fan-out 时带起
+  `MainToy\finanCalc\ic_signal_monitor.py` 常驻模式：等 8:50，每 10 分钟复查到 10:00；
+  周报在同一条链里周一 08:50 生成）。
+- **推送走 MainToy 侧的 notify**（`MainToy\tools\notifycation.py` → py 小助手群 webhook），
+  不经本机器人的 1:1 通道。
+- 所以本仓库的 `ic_monitor` / `ic_weekly` 只保留**手动入口**
+  （`scheduled=False`，不参与定时、不推失败告警），而且指向**同一份脚本、同一份
+  状态/历史文件**（`scheduler/config.py` 的 `IC_HOME`，可用环境变量改）：
+  手动跑和那条链共用去重，**同一条信号只会被推一次**。
+- `jobs/ic_signal_monitor.py`、`jobs/ic_weekly_report.py` 两份副本**已停用**（不再被调度器
+  调用，也不该再单独跑——它们写的是 `var/` 下另一套状态文件，会跟那条链各推一遍）。
 
 - 看作业状态：`python -m scheduler status`（在仓库根跑），钉钉里发 `/jobs` 看同一份。
 - 手动补跑：`python -m scheduler run ic_monitor`（别名 `/ic` 也行）。
@@ -246,6 +261,8 @@
 | 2026-10-21 | **看门狗存活判定加身份校验**：`Test-PidFileAlive` 除 pid 外还要求进程是 python 且命令行匹配（`listen\.py` / `scheduler`）。起因：重启后 `scheduler.pid=21268` 被系统复用给 conhost.exe，看门狗报「已存活」，当天 08:00 / 08:50 两个作业全没跑 | `C:\Users\yydyy77\bin\dingtalk-bot-autostart.ps1` |
 | 2026-10-21 | **IC 通知改走本机器人 1:1**（⚠️ **10-22 已改回 py 小助手群 webhook，见下条**）：`ic_monitor` 不再用 `tools/notifycation.send_dingtalk_message`（那是「交易讯息更新」群另一个自定义机器人的 webhook），改用 `tools.dingtalk_push.push_markdown`，与盘前早报同一通道；失败只记日志不回落群 | `jobs/ic_signal_monitor.py` |
 | 2026-10-21 | **群 webhook 凭据移出代码**：`notifycation.py` 顶部的 webhook / 加签 secret 改为运行时从 `DINGTALK_WEBHOOK` / `DINGTALK_SECRET`（环境变量或仓库根 `.env`）读取，缺失或格式不对直接拒绝发送。旧 token 已随首个提交进 git 历史，需要在群里重置 | `tools/notifycation.py`、`.env.example` |
+| 2026-10-22 | **IC 监控交回 MainToy 那条链**（用户明确：IC 信号的**启动**归 `autorun\autoworkflow.py` 管，不归本机器人；**推送**归人家 notify 那条链路 = py 小助手群 webhook，不归本机器人 1:1）。做法：① `MainToy\autorun\autoworkflow.py` 的 fan-out 里恢复拉起 `MainToy\finanCalc\ic_signal_monitor.py`（用 `sys.executable`，裸 `python` 可能是没有 akshare 的环境）；② MainToy 那份副本补编码兜底（Windows GBK stdout 编不出 emoji 🚨 → `UnicodeEncodeError` → 整轮退出码 1，推送其实已成功）；③ 本仓库 `ic_monitor`/`ic_weekly` 改成 `scheduled=False`（**不参与定时**、不推失败告警），但保留手动入口 `/ic`、`/周报`，且指向**同一份脚本 + 同一份状态/历史文件**（`IC_HOME`）——两边共用去重，同一条信号只推一次；④ 2026-10-21 那次抄底信号的历史并进 MainToy 侧，换链后不会重推 | `scheduler/registry.py`、`scheduler/config.py`、`MainToy\autorun\autoworkflow.py`、`MainToy\finanCalc\ic_signal_monitor.py` |
+| 2026-10-22 | **早报点位图修好**：`tools/wave_engine.py` 是**按需 import** `baostock_daily`（住在 `datalayer/`），调用方没把 `datalayer` 塞进 `sys.path` 就 `ModuleNotFoundError`（`market_mcp` 自己补了，`market_chart`/`premarket` 没补）。现在 wave_engine 自己补 `REPO` + `REPO/datalayer` 两条路径，谁 import 都能跑 | `tools/wave_engine.py` |
 | 2026-10-22 | **`evolve` 改到 09:20 + 720 分钟补跑窗口**：这台机器每天 08:40 才开机，凌晨 03:00 的 60 分钟窗口永远错过（10-21 全天没跑；10-22 03:00 那次是机器没关时侥幸跑到的）。窗口拉到 12 小时后 = "当天机器开着就会跑一次"，开机晚了也开机即补跑 | `scheduler/registry.py` |
 | 2026-10-22 | **兜底模型切换修好**：① `FALLBACK_MODEL` 的 id 从 `MiniMax-M3.1-Flash-Preview` 改成真实存在的 `MiniMax-M3.1-Flash`（切换接口不校验 id，写错的 id 也返回 204"成功"，但会话压根不产出消息 → 用户只看到"已切到"+"空回复"）；② 切换前比对 `/api/model` 清单、切后回读 `session.model` 校验，两处任一不过就如实报错；③ 新增 `stale` 判定，识别"本轮一条 assistant 消息都没产生"；④ 空回复时把真实错误（`provider.quota` 等）显示出来，不再只丢"（空回复）" | `tools/opencode_bridge.py` |
 | 2026-10-22 | **IC 监控退出码 1 修好**：`print(SIGNAL_TRIGGERED:...)` 在 Windows 的 GBK stdout 下编不出 emoji（🚨）→ `UnicodeEncodeError` → 整轮判 failed（**推送其实已经成功**）。改为一律 `ensure_ascii=True`（纯 ASCII，下游按什么编码解都不会错）+ 模块入口把 stdout/stderr 统一切 UTF-8 `errors="replace"` | `jobs/ic_signal_monitor.py` |

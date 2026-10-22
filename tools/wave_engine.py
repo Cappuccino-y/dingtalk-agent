@@ -24,9 +24,23 @@ LuxAlgo Dow Theory 指标、cluefin `dow.py`）：
 
 from __future__ import annotations
 
+import os
+import sys
 import time
 from datetime import datetime, timedelta
 from typing import Dict, List
+
+# 路径：baostock_daily / trade_data_fetcher / eastmoney_patch 都住在 datalayer/，
+# 而这个模块是**按需 import**（_fetch 里才 import），不能指望调用方先把
+# datalayer 塞进 sys.path —— 早报点位图就是这么炸的：
+#   ModuleNotFoundError: No module named 'baostock_daily'
+# （market_mcp 自己补了 DATALAYER，market_chart / premarket 没补。）
+# 这里自己兜住，谁 import 我都能跑。
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_REPO = os.path.dirname(_HERE)
+for _p in (_REPO, os.path.join(_REPO, "datalayer")):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 FIB_TOL = 0.15  # 斐波那契比率容差（±15%）
 

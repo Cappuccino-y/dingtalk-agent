@@ -619,3 +619,9 @@ IC 监控**已经加进去了**，现在是调度器里的第二个作业：
 - supersedes: -
 - evidence_refs: -
 
+## 2026-10-22T11:43:43 — stop
+- Summary: 用户反馈：stop
+- conv: cidwKuyECv5z+YK5cPBDeiA3wT/FKag4TRfj0dqHzRfrDk=
+- session: ses_e9e5bf9d3ffexX3gJLZ3hm1bYK
+- detail: 用户中断了这一轮
+

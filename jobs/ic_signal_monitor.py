@@ -1,9 +1,15 @@
 """
-IC 期货多信号监控（抄底 + 顶部预警/确认）
-- 次日 8:50 检测中证500指数
-- IC 期货价格仅做参考，避免合约换月导致指标失真
-- 触发写入日志 + latest_signal.json + signal_history.json
-- 钉钉通知 + autoworkflow 可捕获 stdout
+IC 期货多信号监控（抄底 + 顶部预警/确认）—— **本副本已停用（2026-10-22）**
+
+IC 监控已交回 MainToy 那条链：
+- 定时启动：`MainToy\autorun\autoworkflow.py` 拉起 `MainToy\finanCalc\ic_signal_monitor.py`
+- 推送：MainToy 侧 notify（py 小助手群 webhook）
+- 本仓库只留**手动入口** `/ic`，指向**同一份脚本、同一份状态/历史**（`scheduler/config.py` 的 `IC_HOME`），
+  两边共用去重，同一条信号只会被推一次。
+
+⚠️ 不要单独跑这个文件：它写的是 `var/ic/` 下**另一套**状态/历史文件，
+   和 MainToy 那条链互不知情 → 同一条信号会被推两遍。
+   要手动跑请用 `/ic`（或 `python -m scheduler run ic`）。
 
 信号体系（全部经 2015-2026 回测验证）:
 
