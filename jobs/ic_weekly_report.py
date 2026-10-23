@@ -91,7 +91,10 @@ def load_index(symbol, qvix_type, margin):
     df = df.rename(columns={"close": "qvix"}).merge(margin, on="date", how="left")
     df = df.sort_values("date").reset_index(drop=True)
     df["rsi14"] = compute_rsi14(df["spot"])
-    df["q5"] = df["qvix"].pct_change(5, fill_method=None)   # 滞后→NaN→不触发
+    # 缺口守门（与 ic_signal_monitor 同源）：QVIX 序列缺行时 pct_change(5) 是位置位移，
+    # "5 天前"会落到不相干的一天 → 触发日不可复现。缺日 = 不判定。
+    from ic_signal_monitor import _mom_with_gap_guard
+    df["q5"] = _mom_with_gap_guard(df["qvix"], 5)
     df["v60"] = np.log(df["spot"] / df["spot"].shift(1)).rolling(60).std() * np.sqrt(252) * 100
     df["m20"] = df["margin"].pct_change(20, fill_method=None)
     df["trig"] = (df["rsi14"] < RSI_TH) & (df["q5"] < QVIX_TH) & (df["v60"] > VOL_TH) & (df["m20"] < 0)

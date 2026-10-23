@@ -236,6 +236,23 @@
   `MainToy\finanCalc\ic_signal_monitor.py` 顶部也加了「已停用」头 → 两边不会双推。
 - 手动入口：`/ic`（= `python -m scheduler run ic_monitor`）、`/周报`。
 
+**抄底信号的三条防误判规则**（2026-10-23 加，起因是 2026-09-24 那次误判）：
+
+1. **QVIX 窗口缺日 → 不判定**：`pct_change(5)` 是位置位移，QVIX 序列缺行时「5 天前」会落到
+   不相干的一天（2026-09-10/11 两天 QVIX 缺失 → 09-11、10-12 那两次触发今天都算不出来）。
+   缺数据 = 不判定，不是 = 触发（`jobs/ic_signal_monitor.py::_mom_with_gap_guard`）。
+2. **长假前夜 → 顺延到节后重判**：最新数据日若紧跟 ≥3 天连续休市（查 akshare 交易日历，
+   判据是「下一个交易日 - 数据日 ≥ 4 个自然日」），本轮不判定，等节后第一个交易日重判。
+   2026-09-24 那次就是这么被拦掉的：节后 09-28~10-12 连续 6 个交易日都不成立。
+3. **融资强度分级（不设硬门槛）**：融资 20 日动量 ≤-3% = 强（真实杠杆出清），
+   >-3% = 弱（趋势性降杠杆，只作观察）。实测把 -3% 当硬门槛会剔掉 9 簇里的 6 簇，
+   其中 5 簇是 20/60 日都涨的有效样本 → 那是「删好样本」，不是「去坏样本」。
+
+回测：`python jobs/ic_backtest.py`（新旧口径对比 + **统一持有期口径**：
+入场 = 信号后第一个可交易日**开盘**，第 N 个交易日收盘出）。
+结果：新口径**只剔掉 2026-09-24**，无新增；20 日 7/7、60 日 6/6 不变，5 日 4/8 → 4/7。
+测试：`python -m unittest discover -s tests`（15 项，全合成数据，不联网）。
+
 - 看作业状态：`python -m scheduler status`（在仓库根跑），钉钉里发 `/jobs` 看同一份。
 - 手动补跑：`python -m scheduler run ic_monitor`（别名 `/ic` 也行）。
 - 设计取舍、调度语义（occurrence / 窗口 / 重试 / misfire）见 `docs/scheduler.md`。
@@ -275,6 +292,8 @@
 | 2026-10-22 | **审批卡不再"读不懂就收尾"（第二次修同一个坑）**：上一条只拦了 fromConfig，但**任何**读不出决定的回调（字段名对不上、值是中文、用户取消时）都会走同一条"❓ 没看懂你的选择 → `_finish(CANCELLED)`"分支 —— 卡片一收尾，用户就再也没法在这张卡上作答，提案变孤儿（用户看到的正是"已取消 ❓ 没看懂你的选择"）。现在：① 读不懂决定**不收尾**，把 `card_status` 退回 `pending`（表单重新可提交）+ 提示重选；② 决定值归一化（批准/驳回/稍后再说 等中文写法也认）；③ 批量卡没选的提案**保持 pending** 并立刻重推一张卡；④ `defer`（稍后再说/取消）**不再冻结**提案 —— 原来把 status 改成 `deferred`，而 `approve()` 只认 `pending`，等于"稍后再说"= 永久作废；现在仍是 pending，下一轮 evolve 推卡时（间隔 ≥6h）会再问一次。⚠️ 教训：**改完代码必须等重启生效再让用户点**，10-22 那次用户在新代码上线前 85 秒点了旧卡，被旧逻辑打死 | `tools/opencode_bridge.py`、`tools/evolve.py`、`tools/apply_proposal.py` |
 
 | 2026-10-23 | **IC 监控收回本 bot**（用户明确：「我当时的决定是错误的，改回来，这个 icmonitor 完全由你控制」）：① `scheduler/registry.py` 的 `ic_monitor` 改回 `scheduled=True`（周一~周五 08:50，脚本 = 本仓库 `jobs/ic_signal_monitor.py --once`，失败告警回本机器人 1:1），新增 `ic_recheck`（09:20，`--once --triggers-only`，补 08:50 因数据滞后被拒判的情况），`ic_weekly` 改回周一 09:05；② 推送改回**本机器人 1:1**（`tools/dingtalk_push.push_markdown` / `push_image`）→ 钉钉署名是本机器人，不再是「py 小助手」群机器人，群推变成开关 `IC_PUSH_GROUP=1`；③ 状态/历史统一到本仓库 `var/ic/`，并把 MainToy 侧历史**并进来**（含 2026-10-22 那条抄底）→ 不重推，MainToy 侧旧状态文件改名归档 `*.retired-20261023.json`；④ `MainToy\autorun\autoworkflow.py` 删除拉起 IC 脚本的 Popen（留停用说明），`MainToy\finanCalc\ic_signal_monitor.py` 顶部加「已停用」头 → 两边不会双推；⑤ 调度器进程已重启加载新作业表 | `scheduler/registry.py`、`scheduler/config.py`、`jobs/ic_signal_monitor.py`、`jobs/ic_weekly_report.py`、`MainToy\autorun\autoworkflow.py`、`MainToy\finanCalc\ic_signal_monitor.py` |
+
+| 2026-10-23 | **IC 抄底信号加三条防误判规则**（起因：2026-09-24 那次误判 —— 触发日是中秋前最后一个交易日，指数 -2.15% 是节前流动性枯竭的抛售、QVIX 几乎没定价（23.30→23.98），而「5日动量 -7.38%」测的是 6 天前一轮**反弹期**的恐慌溢价消退；随后 20 日再跌 11.2%）：① **QVIX 窗口缺日 → 不判定**（`pct_change(5)` 是位置位移，序列缺行时「5 天前」会落到不相干的一天；09-11、10-12 那两次触发今天已不可复现）；② **长假前夜 → 顺延到节后第一个交易日重判**（查 akshare 交易日历，判据「下一个交易日 - 数据日 ≥ 4 自然日」；09-24 顺延后 09-28~10-12 连续 6 日都不成立 → 那次假信号消失）；③ **融资强度分级**（≤-3% 强 / >-3% 弱，**不设硬门槛** —— 实测硬门槛会剔掉 9 簇里 6 簇、其中 5 簇是 20/60 日都涨的有效样本）。消息文案同步：去掉「历史 100% 60日胜率」和具体买卖指令，改为真实口径 + 强弱标注 + 兑现窗口提示。新增 `jobs/ic_backtest.py`（新旧口径对比 + **统一持有期口径**：信号后首个可交易日开盘入场）与 `tests/test_ic_signal.py`（15 项，全合成数据）。回测结果：新口径**只剔掉 2026-09-24**，无新增，20日 7/7、60日 6/6 不变、5日 4/8→4/7 | `jobs/ic_signal_monitor.py`、`jobs/ic_backtest.py`、`jobs/ic_weekly_report.py`、`tests/test_ic_signal.py` |
 
 ---
 

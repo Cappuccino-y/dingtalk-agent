@@ -10,11 +10,11 @@ IC 监控整条链归本机器人（用户 2026-10-23 明确：「这个 icmonit
 
 想**额外**推「交易讯息更新」群（py 小助手 webhook）：设环境变量 `IC_PUSH_GROUP=1`（默认只推 1:1）。
 
-信号体系（全部经 2015-2026 回测验证）:
+信号体系（2015-2026 回测验证，2026-10-23 加了三条防误判规则）:
 
 【抄底信号】RSI<44 + QVIX 5d<-3% + vol>20% + 融资20日降
-  历史: 9 簇射/3.9年, 已验证 7/7 = 100% 60日胜率
   → 恐慌释放 + 杠杆出清 → 做多
+  **强度分级**：融资20日 ≤-3% = 强（真实杠杆出清）；>-3% = 弱（趋势性降杠杆，只作观察）
 
 【顶部预警】60日新高 + 3日跌>3% + 融资>90%
   历史: 12次, 83.3% 后续 5-20 日跌>5%
@@ -23,6 +23,21 @@ IC 监控整条链归本机器人（用户 2026-10-23 明确：「这个 icmonit
 【顶部确认】顶部预警 + QVIX 3日涨>0%
   历史: 5次, 100% 后续 5-20 日跌>5%
   → 恐慌加剧 → 做空确认
+
+三条防误判规则（2026-10-23 加，起因见下面「已知误判案例」）：
+
+1. **QVIX 窗口缺日 → 不判定**：`pct_change(5)` 是位置位移，QVIX 序列缺行时
+   "5 天前"会落到不相干的一天（2026-09-10/11 两天 QVIX 缺失 → 09-11、10-12
+   那两次触发的"5日动量"今天都算不出来）。缺数据 = 不判定，不是 = 触发。
+2. **长假前夜 → 顺延到节后重判**：最新数据日若紧跟 ≥3 天连续休市（长假前夜），
+   本轮不判定，等节后第一个交易日重判。2026-09-24 那次就是这么被拦掉的。
+3. **融资强度分级**：不设 -3% 硬门槛（实测会剔掉 9 簇里的 6 簇，其中 5 簇是
+   20/60 日都涨的有效样本），只分级标注。
+
+**已知误判案例**：2026-09-24（中秋前最后一个交易日）那次抄底 —— 指数 -2.15%
+是节前流动性枯竭的抛售、QVIX 几乎没反映（23.30→23.98），而"5日动量 -7.38%"
+测的是 6 天前一轮**反弹期**的恐慌溢价消退（同期指数还涨到 7850）。节后重判
+（09-28~10-09 连续 5 个交易日）均不成立 → 规则 2 生效。
 
 时间说明：akshare 当天数据在收盘后 3-5 小时（约 18:00 后）才更新，
 次日 8:50 跑相当于"开盘前预警"，拿到的是前一天的完整收盘数据。
@@ -232,14 +247,36 @@ def already_alerted(current_date_str: str, sig_type: str) -> bool:
     )
 
 
+def _mom_with_gap_guard(s: pd.Series, n: int) -> pd.Series:
+    """n 日动量，但**窗口内任一天缺数据 → 该日动量无效（NaN）**。
+
+    为什么不能直接用 `s.pct_change(n)`：那是**位置位移**。QVIX 序列缺行时
+    （2026-09-10、09-11 两天就缺），"n 天前"会落到不相干的那一天 ——
+    09-11、10-12 那两次触发就是这么来的，今天按同样的数据算根本复现不出来。
+    缺数据必须 = 不判定，不能 = 触发。
+    """
+    out = np.full(len(s), np.nan, dtype="float64")
+    vals = s.to_numpy(dtype="float64")
+    for i in range(n, len(vals)):
+        win = vals[i - n: i + 1]
+        if np.isnan(win).any():
+            continue
+        base = win[0]
+        if base <= 0:
+            continue
+        out[i] = win[-1] / base - 1.0
+    return pd.Series(out, index=s.index)
+
+
 def prepare_signals(df: pd.DataFrame) -> pd.DataFrame:
     """计算所有指标列"""
     df = df.copy()
     df["rsi14"] = compute_rsi14(df["spot"], 14)
     # fill_method=None: 数据源滞后产生NaN时动量=NaN→条件不满足
     # (默认pad会用旧值填充NaN, 用陈旧数据算出假动量, 2026-10-12假触发根因)
-    df["qvix_mom_3d"] = df["qvix"].pct_change(3, fill_method=None)
-    df["qvix_mom_5d"] = df["qvix"].pct_change(5, fill_method=None)
+    # + 缺口守门: 窗口内缺日 → 动量无效（规则 1）
+    df["qvix_mom_3d"] = _mom_with_gap_guard(df["qvix"], 3)
+    df["qvix_mom_5d"] = _mom_with_gap_guard(df["qvix"], 5)
     df["vol_60d"] = compute_vol_60d(df["spot"], 60)
     df["margin_mom20"] = df["margin"].pct_change(20, fill_method=None)
     df["margin_pct"] = df["margin"].rolling(250).apply(
@@ -248,6 +285,80 @@ def prepare_signals(df: pd.DataFrame) -> pd.DataFrame:
     df["high60_prev"] = df["spot"].rolling(60, min_periods=60).max().shift(1)
     df["is_high"] = df["spot"] > df["high60_prev"]
     return df
+
+
+# ---------------------------------------------------------------- 交易日历
+# 行情日线里**没有假日的行**，光看指数数据看不出"节前"。
+# 判断长假前夜必须查交易日历（akshare 一次拉全量，缓存 6 小时）。
+_TRADE_CAL: set | None = None
+_TRADE_CAL_TS: float = 0.0
+
+LONG_HOLIDAY_GAP_DAYS = 4   # 数据日 -> 下一个交易日 的自然日间隔 >= 4 → 后面紧跟长假
+
+
+def _trade_calendar() -> set:
+    """A 股交易日历（date 集合）。拉不到就返回空集 → 节前判断降级。"""
+    global _TRADE_CAL, _TRADE_CAL_TS
+    now = time.time()
+    if _TRADE_CAL is not None and now - _TRADE_CAL_TS < 6 * 3600:
+        return _TRADE_CAL
+    try:
+        cal_df = ak.tool_trade_date_hist_sina()
+        cal = {pd.Timestamp(d).date() for d in cal_df["trade_date"]}
+        _TRADE_CAL, _TRADE_CAL_TS = cal, now
+        logging.info(f"交易日历已加载（{len(cal)} 天）")
+        return cal
+    except Exception as e:  # noqa: BLE001
+        logging.warning(f"拉交易日历失败（{e}），节前顺延判断降级为不启用")
+        return set()
+
+
+def is_pre_long_holiday(d) -> bool:
+    """这个交易日是不是"长假前夜"（后面紧跟 >=3 天连续休市）。
+
+    判据：下一个交易日 - 该交易日 >= 4 个自然日
+    （普通周末 = 3 天：周五→周一；长假前夜 >= 4 天，如中秋前的周四→下周一）。
+
+    为什么要有这条：2026-09-24（中秋前最后一个交易日）那次抄底是假信号 ——
+    当天指数 -2.15% 是节前流动性枯竭的抛售、QVIX 几乎没定价（23.30→23.98），
+    而"5日动量 -7.38%"测的是 6 天前一轮**反弹期**的恐慌溢价消退。
+    节后第一个交易日重判时（09-28~10-09 连续 5 日）条件都不成立 → 这次信号就不该发。
+    """
+    cal = _trade_calendar()
+    if not cal:
+        return False
+    d0 = d.date() if hasattr(d, "date") else d
+    later = [x for x in cal if x > d0]
+    if not later:
+        return False
+    return (min(later) - d0).days >= LONG_HOLIDAY_GAP_DAYS
+
+
+# ------------------------------------------------------------ 信号强度分级
+STRONG_MARGIN_MOM = -0.03   # 融资余额 20 日动量 <= -3% → 强信号
+
+
+def signal_strength(result: dict) -> tuple:
+    """给抄底信号分级 → (等级, 说明)。
+
+    强：融资 20 日动量 ≤ -3% → 真实杠杆出清
+    弱：融资 20 日动量 在 (-3%, 0) → 趋势性降杠杆（节前/月末常见），证据偏弱
+
+    为什么分级而不是设 -3% 硬门槛：实测硬门槛会剔掉 9 簇里的 6 簇，
+    其中 5 簇是 20/60 日都上涨的有效样本（2022-10-31 / 2024-12-31 / 2025-01-09 /
+    2025-11-25 / 2026-03-25）—— 那是"删好样本"，不是"去坏样本"，
+    而且它挡不住 10-12 那次假触发（那次融资 -3.19% 照样通过）。
+    """
+    m = result.get("margin_mom20")
+    try:
+        m = float(m)
+    except (TypeError, ValueError):
+        return "未知", "融资数据缺失"
+    if m != m:  # NaN
+        return "未知", "融资数据缺失"
+    if m <= STRONG_MARGIN_MOM:
+        return "强", f"融资20日 {m:.2%}（≤-3%，真实杠杆出清）"
+    return "弱", f"融资20日 {m:.2%}（>-3%，趋势性降杠杆，证据偏弱）"
 
 
 def check_bottom_signal(df: pd.DataFrame) -> dict:
@@ -259,6 +370,9 @@ def check_bottom_signal(df: pd.DataFrame) -> dict:
         stale.append("QVIX")
     if pd.isna(latest["margin_mom20"]):
         stale.append("融资余额")
+    # 规则 1：QVIX 窗口内有缺日 → 5 日动量不可算 → 本轮不判定（并说明原因）
+    if pd.notna(latest["qvix"]) and pd.isna(latest["qvix_mom_5d"]):
+        stale.append("QVIX窗口缺日")
     qvix_last_date = df.loc[df["qvix"].notna(), "date"].iloc[-1] if df["qvix"].notna().any() else None
     if qvix_last_date is not None and (latest["date"] - qvix_last_date).days >= 2:
         stale.append(f"QVIX滞后{(latest['date'] - qvix_last_date).days}天")
@@ -341,8 +455,9 @@ def _status_icon(ok: bool) -> str:
     return "✅" if ok else "❌"
 
 
-def build_bottom_message(r: dict, last_date: str) -> str:
+def build_bottom_message(r: dict, last_date: str, note: str = "") -> str:
     """抄底信号消息"""
+    level, why = signal_strength(r)
     lines = [
         "## 🚨 抄底信号触发",
         f"**日期**: {r['date']}　上次: {last_date}",
@@ -354,20 +469,28 @@ def build_bottom_message(r: dict, last_date: str) -> str:
         f"3. 60日波动率 = {r['vol_60d']:.1f}% {_status_icon(r['vol_ok'])} 阈值 > 20%",
         f"4. 融资20日 = {r['margin_mom20']:.2%} {_status_icon(r['margin_ok'])} 阈值 < 0",
         "---",
-        "**信号**: 恐慌释放 + 杠杆出清，疑似底部（历史 100% 60日胜率）",
-        "**建议**: 加仓 1 手 IC 期货",
+        f"**信号强度**: {level}｜{why}",
+        "**信号含义**: 恐慌释放 + 杠杆出清，属于底部特征区",
+        "**历史参考**: 新口径 8 簇样本(2022-2026)｜20日 7/7、60日 6/6、**5日仅 4/7**"
+        "（信号后首个可交易日开盘入场）→ 触发后仍可能继续下探，兑现窗口在 20 个交易日",
     ]
+    if level == "弱":
+        lines.append("**注意**: 弱信号仅作观察，不建议单独作为动作依据")
+    if note:
+        lines.append(f"**备注**: {note}")
     return "\n".join(lines)
 
 
-def build_top_message(r: dict, last_date: str) -> str:
+def build_top_message(r: dict, last_date: str, note: str = "") -> str:
     """顶部信号消息（预警/确认）"""
     if r["confirmed"]:
         title = "## 🔴 顶部确认信号（强）"
-        tail = "**信号**: 强确认（历史 100% 后续 5-20 日跌>5%）\n**建议**: 考虑做空 1 手 IC 期货"
+        tail = ("**信号含义**: 强确认（历史参考：5 次，后续 5-20 日跌>5% 的比例 100%，"
+                "样本 n=5，仅供参考）")
     else:
         title = "## 🟠 顶部预警信号"
-        tail = "**信号**: 预警（历史 83.3% 后续 5-20 日跌>5%）\n**建议**: 减仓/观望，等待确认"
+        tail = ("**信号含义**: 预警（历史参考：12 次，后续 5-20 日跌>5% 的比例 83.3%，"
+                "样本 n=12，仅供参考）")
     drop_str = f"{r['drop3']:.1f}%" if pd.notna(r['drop3']) else "nan"
     lines = [
         title,
@@ -382,15 +505,17 @@ def build_top_message(r: dict, last_date: str) -> str:
         "---",
         tail,
     ]
+    if note:
+        lines.append(f"**备注**: {note}")
     return "\n".join(lines)
 
 
-def write_alert(result: dict, last_date: str):
+def write_alert(result: dict, last_date: str, note: str = ""):
     """触发时：写最新信号 + 更新历史 + 追加日志"""
     if result["type"] == "bottom":
-        message = build_bottom_message(result, last_date)
+        message = build_bottom_message(result, last_date, note)
     else:
-        message = build_top_message(result, last_date)
+        message = build_top_message(result, last_date, note)
 
     # 更新历史
     history = load_history()
@@ -457,16 +582,16 @@ def write_status(bottom: dict, top: dict):
     logging.info(f"心跳更新 {LATEST_SIGNAL}: 抄底{'触发' if bottom['triggered'] else '未触发'} 顶部{'预警' if top['triggered'] else '未触发'}")
 
 
-def notify_dingtalk(result: dict, last_date: str = None):
+def notify_dingtalk(result: dict, last_date: str = None, note: str = ""):
     """通过钉钉发送通知"""
     if result["type"] == "bottom":
-        msg = build_bottom_message(result, last_date)
+        msg = build_bottom_message(result, last_date, note)
         title = "🚨 抄底信号触发"
     elif result["confirmed"]:
-        msg = build_top_message(result, last_date)
+        msg = build_top_message(result, last_date, note)
         title = "🔴 顶部确认信号触发"
     else:
-        msg = build_top_message(result, last_date)
+        msg = build_top_message(result, last_date, note)
         title = "🟠 顶部预警信号触发"
 
     try:
@@ -625,6 +750,36 @@ def run_once(force: bool = False, dry_run: bool = False, heartbeat: bool = True)
         "sent": [],
     }
 
+    # ---------------------------------------------------- 规则 2：长假前夜顺延
+    # 最新数据日后面紧跟 >=3 天连续休市 → 本轮不判定，等节后第一个交易日重判。
+    # （2026-09-24 中秋前那次假信号就是被这条拦掉的：节后 09-28~10-09 连续 5 日都不成立）
+    data_date = df["date"].iloc[-1]
+    state = load_state()
+    deferred_date = state.get("deferred_date")
+    if not force and is_pre_long_holiday(data_date):
+        write_status(bottom, top)
+        if not dry_run:
+            save_state(
+                deferred_date=data_date.strftime("%Y-%m-%d"),
+                deferred_at=now.strftime("%Y-%m-%d %H:%M:%S"),
+            )
+        logging.info(
+            "最新数据日 %s 后面紧跟长假（下一个交易日相距 >=%d 天），"
+            "本轮不判定，顺延到节后第一个交易日重判",
+            data_date.date(), LONG_HOLIDAY_GAP_DAYS,
+        )
+        result["skipped"] = "pre-holiday-deferred"
+        result["deferred_date"] = data_date.strftime("%Y-%m-%d")
+        return result
+
+    # 上一轮有没有被顺延的节前触发？本轮判定用的就是节后第一个交易日的数据 → 带上备注
+    note = ""
+    if deferred_date and deferred_date != bottom["date"]:
+        note = f"{deferred_date} 为节前触发，已顺延至 {bottom['date']} 重判"
+        logging.info(note)
+    if deferred_date and not dry_run:
+        save_state(deferred_date=None, deferred_at=None)
+
     # 周一周报由调度器单独排（scheduler 里的 ic_weekly 作业），这里不再重复触发
 
     # 今日是否已有信号落地（含上一条进程/今早推过的）
@@ -636,11 +791,11 @@ def run_once(force: bool = False, dry_run: bool = False, heartbeat: bool = True)
         last_date = get_last_trigger_date(bottom["date"], "bottom")
         if dry_run:
             logging.info("[dry-run] 抄底信号:\n%s",
-                         build_bottom_message(bottom, last_date))
+                         build_bottom_message(bottom, last_date, note))
             result["sent"].append("bottom(dry-run)")
         else:
-            payload = write_alert(bottom, last_date)
-            notify_dingtalk(bottom, last_date)
+            payload = write_alert(bottom, last_date, note)
+            notify_dingtalk(bottom, last_date, note)
             emit_signal(payload)
             result["sent"].append("bottom")
     # 顶部信号（预警/确认）
@@ -648,11 +803,11 @@ def run_once(force: bool = False, dry_run: bool = False, heartbeat: bool = True)
         last_date = get_last_trigger_date(top["date"], "top_warn")
         if dry_run:
             logging.info("[dry-run] 顶部信号:\n%s",
-                         build_top_message(top, last_date))
+                         build_top_message(top, last_date, note))
             result["sent"].append(f"{top['type']}(dry-run)")
         else:
-            payload = write_alert(top, last_date)
-            notify_dingtalk(top, last_date)
+            payload = write_alert(top, last_date, note)
+            notify_dingtalk(top, last_date, note)
             emit_signal(payload)
             result["sent"].append(top["type"])
 
@@ -732,6 +887,13 @@ def main():
                 f"跌3日={top['drop3']:.1f}% 融分位={top['margin_pct']:.2f} "
                 f"QVIX3d={top['qvix_mom_3d']:.2%} → 预警:{top['triggered']} 确认:{top['confirmed']}"
             )
+
+            # 规则 2：长假前夜 → 本轮不判定，等节后第一个交易日重判
+            if is_pre_long_holiday(df["date"].iloc[-1]):
+                logging.info("最新数据日 %s 是长假前夜，本轮不判定（顺延到节后重判）",
+                             df["date"].iloc[-1].date())
+                time.sleep(600)
+                continue
 
             # 触发处理
             triggered_any = False
