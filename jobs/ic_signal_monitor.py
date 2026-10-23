@@ -1,15 +1,14 @@
 """
-IC 期货多信号监控（抄底 + 顶部预警/确认）—— **本副本已停用（2026-10-22）**
+IC 期货多信号监控（抄底 + 顶部预警/确认）—— **由本 bot 自主管理（2026-10-23 收回）**
 
-IC 监控已交回 MainToy 那条链：
-- 定时启动：`MainToy\autorun\autoworkflow.py` 拉起 `MainToy\finanCalc\ic_signal_monitor.py`
-- 推送：MainToy 侧 notify（py 小助手群 webhook）
-- 本仓库只留**手动入口** `/ic`，指向**同一份脚本、同一份状态/历史**（`scheduler/config.py` 的 `IC_HOME`），
-  两边共用去重，同一条信号只会被推一次。
+IC 监控整条链归本机器人（用户 2026-10-23 明确：「这个 icmonitor 完全由你控制」）：
+- 定时：本仓库调度器作业 `ic_monitor`（08:50）/ `ic_recheck`（09:20）/ `ic_weekly`（周一 09:05）
+- 推送：**本机器人 1:1 通道**（tools.dingtalk_push）→ 署名是本机器人，不是「py 小助手」群机器人
+- 状态/历史：本仓库 `var/ic/`（已并入 MainToy 那条链的历史，10-22 那条抄底不会重推）
+- 手动入口：`/ic`（聊天）或 `python -m scheduler run ic_monitor`（命令行，作业 id 只能用 id）
+- 另：`MainToy\autorun\autoworkflow.py` 已不再拉起 IC 脚本，不会双推
 
-⚠️ 不要单独跑这个文件：它写的是 `var/ic/` 下**另一套**状态/历史文件，
-   和 MainToy 那条链互不知情 → 同一条信号会被推两遍。
-   要手动跑请用 `/ic`（或 `python -m scheduler run ic`）。
+想**额外**推「交易讯息更新」群（py 小助手 webhook）：设环境变量 `IC_PUSH_GROUP=1`（默认只推 1:1）。
 
 信号体系（全部经 2015-2026 回测验证）:
 
@@ -47,10 +46,11 @@ for _p in (REPO, HERE):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-# 钉钉通知：走「交易讯息更新」群的 py 小助手 webhook（tools.notifycation）。
-# 2026-10-22 用户明确：IC 信号的推送是人家 notify 那条链路负责的，
-# 由 py 小助手推，不要换成 dingtalk-agent 机器人的 1:1 通道。
-from tools.notifycation import send_dingtalk_message
+# ---------------------------------------------------------------- 推送出口
+# 2026-10-23：IC 信号改由**本机器人**发出（1:1 通道，署名本机器人）。
+# 之前走「交易讯息更新」群的 py 小助手 webhook（tools.notifycation）——那是 MainToy 那条链的出口；
+# 现在整条 IC 链归本 bot，启动、状态、去重、推送都是自己说了算。
+PUSH_GROUP = os.environ.get("IC_PUSH_GROUP", "").strip().lower() in ("1", "true", "yes", "on")
 
 # ---------------------------------------------------------------- 编码兜底
 # Windows 上 stdout/stderr 默认是 GBK(cp936)：emoji（🚨）**根本编不出去**，
@@ -78,18 +78,27 @@ def emit_signal(payload: dict) -> None:
         logging.error("输出 SIGNAL_TRIGGERED 失败：%s", e)
 
 
-def push_bot_message(text: str, title: str = "金融技术提醒") -> bool:
-    """走 py 小助手群 webhook（notifycation）发 markdown。
+def push_bot_message(text: str, title: str = "IC 信号") -> bool:
+    """把信号推到用户钉钉 1:1 会话（**本机器人**署名）。
 
-    保留旧名只为调用点少改；实质就是 notifycation.send_dingtalk_message。
+    - 主通道：tools.dingtalk_push.push_markdown（机器人 1:1，长期有效）
+    - 可选：IC_PUSH_GROUP=1 时**额外**推一次「交易讯息更新」群（py 小助手 webhook）
     """
+    ok = False
     try:
-        ok = bool(send_dingtalk_message(text))
+        from tools.dingtalk_push import push_markdown
+        ok = bool(push_markdown(text, title=title))
     except Exception as e:  # noqa: BLE001
-        logging.error(f"群 webhook 推送异常（{title}）：{e}")
-        return False
+        logging.error(f"1:1 推送异常（{title}）：{e}")
     if not ok:
-        logging.error(f"群 webhook 推送失败（{title}）")
+        logging.error(f"1:1 推送失败（{title}）")
+
+    if PUSH_GROUP:
+        try:
+            from tools.notifycation import send_dingtalk_message
+            send_dingtalk_message(text)
+        except Exception as e:  # noqa: BLE001
+            logging.error(f"群 webhook 推送异常（{title}）：{e}")
     return ok
 
 

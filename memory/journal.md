@@ -625,3 +625,31 @@ IC 监控**已经加进去了**，现在是调度器里的第二个作业：
 - session: ses_e9e5bf9d3ffexX3gJLZ3hm1bYK
 - detail: 用户中断了这一轮
 
+## 2026-10-23T09:21:22 — evolve
+- Summary: 扫描完成，提出 3 条提案，等待用户审批
+- proposals: prop_20261023-092121_37e5,prop_20261023-092121_31ad,prop_20261023-092121_6e9c
+
+## 2026-10-23T10:40:08 — proposal_approved
+- Summary: 提案已落地: Evolve 作业应避开凌晨并在开机后补跑
+- proposal: prop_20261023-092121_37e5
+- memory_id: mem_d5523115_23208
+- scope: project:dingtalk-agent
+- supersedes: -
+- evidence_refs: card:oc-6d92034967cd400dbd40, session:ses_ea068f460ffel74aIKhwciWQBC
+
+## 2026-10-23T10:40:11 — proposal_approved
+- Summary: 提案已落地: Evolve 多阶段审批必须等待真实用户选择
+- proposal: prop_20261023-092121_31ad
+- memory_id: mem_87af8b34_23211
+- scope: project:dingtalk-agent
+- supersedes: -
+- evidence_refs: card:oc-0b2e59dadc9b400da3e2, session:ses_e9eabefcbffeSUtMRjnb2fHOq1
+
+## 2026-10-23T10:40:11 — proposal_approved
+- Summary: 提案已落地: IC Monitor 推送成功后不得因编码异常误报失败
+- proposal: prop_20261023-092121_6e9c
+- memory_id: mem_3aef672e_23211
+- scope: project:dingtalk-agent
+- supersedes: -
+- evidence_refs: card:oc-e3cb360ac9594c8ea819, session:ses_e9ec03994ffe8wp922KMVDvSAF, card:oc-8f813219435644718c7a, session:ses_e9ec03994ffe8wp922KMVDvSAF
+

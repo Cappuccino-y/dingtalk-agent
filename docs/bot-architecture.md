@@ -216,22 +216,25 @@
 |---|---|---|
 | `premarket` 盘前早报 | 每天 08:00（补跑 180 分钟） | `jobs/premarket_push.py` |
 | `evolve` 知识与行为改进扫描 | 每天 09:20（补跑 720 分钟） | `tools/evolve.py` |
-| `ic_monitor` IC 信号监控 | **仅手动**（`/ic`） | `MainToy\finanCalc\ic_signal_monitor.py`（IC 归那条链，见下） |
-| `ic_weekly` IC 周报 | **仅手动**（`/周报`） | `MainToy\finanCalc\ic_weekly_report.py` |
+| `ic_monitor` IC 信号监控 | 周一~周五 08:50（补跑 70 分钟） | `jobs/ic_signal_monitor.py` |
+| `ic_recheck` IC 信号补判 | 周一~周五 09:20（补跑 40 分钟） | `jobs/ic_signal_monitor.py --once --triggers-only` |
+| `ic_weekly` IC 周报 | 周一 09:05（补跑 100 分钟） | `jobs/ic_weekly_report.py` |
 
-**IC 监控（抄底/顶部信号 + 周报）2026-10-22 起交回 MainToy 那条链**：
+**IC 监控（抄底/顶部信号 + 周报）2026-10-23 起收回本仓库**（用户明确：
+「我当时的决定是错误的，改回来，这个 icmonitor 完全由你控制」）：
 
-- **定时由 `MainToy\autorun\autoworkflow.py` 拉起**（它开机 fan-out 时带起
-  `MainToy\finanCalc\ic_signal_monitor.py` 常驻模式：等 8:50，每 10 分钟复查到 10:00；
-  周报在同一条链里周一 08:50 生成）。
-- **推送走 MainToy 侧的 notify**（`MainToy\tools\notifycation.py` → py 小助手群 webhook），
-  不经本机器人的 1:1 通道。
-- 所以本仓库的 `ic_monitor` / `ic_weekly` 只保留**手动入口**
-  （`scheduled=False`，不参与定时、不推失败告警），而且指向**同一份脚本、同一份
-  状态/历史文件**（`scheduler/config.py` 的 `IC_HOME`，可用环境变量改）：
-  手动跑和那条链共用去重，**同一条信号只会被推一次**。
-- `jobs/ic_signal_monitor.py`、`jobs/ic_weekly_report.py` 两份副本**已停用**（不再被调度器
-  调用，也不该再单独跑——它们写的是 `var/` 下另一套状态文件，会跟那条链各推一遍）。
+- **定时由本仓库调度器负责**：`ic_monitor`（08:50 主判：触发推信号，没触发推每日心跳日报）、
+  `ic_recheck`（09:20 补判，只补真信号不发心跳——补 08:50 因数据滞后被拒判的情况）、
+  `ic_weekly`（周一 09:05 出图）。
+- **推送走本机器人 1:1 通道**（`tools/dingtalk_push.push_markdown` / `push_image`）→
+  钉钉里署名是**本机器人**，不再是「py 小助手」群机器人。
+  想额外推「交易讯息更新」群：设环境变量 `IC_PUSH_GROUP=1`（默认只推 1:1）。
+- **状态/历史在本仓库 `var/ic/`**（`ic_signal_history.json` / `ic_latest_signal.json` /
+  `ic_monitor_state.json`），已把 MainToy 那条链的历史**并进来**（含 2026-10-22 那条抄底）
+  → 不会重推。MainToy 侧旧状态文件已改名归档为 `*.retired-20261023.json`。
+- **`MainToy\autorun\autoworkflow.py` 不再拉起 IC 脚本**（那段 Popen 已删并留停用说明），
+  `MainToy\finanCalc\ic_signal_monitor.py` 顶部也加了「已停用」头 → 两边不会双推。
+- 手动入口：`/ic`（= `python -m scheduler run ic_monitor`）、`/周报`。
 
 - 看作业状态：`python -m scheduler status`（在仓库根跑），钉钉里发 `/jobs` 看同一份。
 - 手动补跑：`python -m scheduler run ic_monitor`（别名 `/ic` 也行）。
@@ -270,6 +273,8 @@
 | 2026-10-22 | **单轮等待上限 900 → 1800 秒 + 超时不再装作答完**：`WAIT_TIMEOUT` 从 900 提到 1800（900s 太短，长任务那轮会被腰斩）；新增 `timed_out` 标记 —— 等超时时（`wait_idle` 抛 ReadTimeout）不再把半截正文当最终回答，而是如实标「⏱ 已截断」+ 给出「继续刚才的」入口，卡片状态也不再显示「✅ 完成」 | `tools/opencode_bridge.py` |
 | 2026-10-22 | **evolve 审批卡：一张卡批所有提案 + 拦掉非作答回调**：① 原来一条提案推一张卡（手机要分别点开分别提交），现在合成**一张批量卡**（一条提案一个 SELECT 域 `p0/p1/...`，`question_id` 编成 `evolve:batch:<pid1>,<pid2>`），一次提交全部结算，超过 4 条分批推；② 钉钉在卡片渲染时会回调一次 `params={"fromConfig": ""}`，老逻辑把它当成用户作答，于是**用户还没碰第二张卡**它就被判成「❓ 没看懂你的选择」并收尾（提案其实还挂着）—— 现在非作答事件一律忽略、不动卡片 | `tools/opencode_bridge.py`、`tools/evolve.py` |
 | 2026-10-22 | **审批卡不再"读不懂就收尾"（第二次修同一个坑）**：上一条只拦了 fromConfig，但**任何**读不出决定的回调（字段名对不上、值是中文、用户取消时）都会走同一条"❓ 没看懂你的选择 → `_finish(CANCELLED)`"分支 —— 卡片一收尾，用户就再也没法在这张卡上作答，提案变孤儿（用户看到的正是"已取消 ❓ 没看懂你的选择"）。现在：① 读不懂决定**不收尾**，把 `card_status` 退回 `pending`（表单重新可提交）+ 提示重选；② 决定值归一化（批准/驳回/稍后再说 等中文写法也认）；③ 批量卡没选的提案**保持 pending** 并立刻重推一张卡；④ `defer`（稍后再说/取消）**不再冻结**提案 —— 原来把 status 改成 `deferred`，而 `approve()` 只认 `pending`，等于"稍后再说"= 永久作废；现在仍是 pending，下一轮 evolve 推卡时（间隔 ≥6h）会再问一次。⚠️ 教训：**改完代码必须等重启生效再让用户点**，10-22 那次用户在新代码上线前 85 秒点了旧卡，被旧逻辑打死 | `tools/opencode_bridge.py`、`tools/evolve.py`、`tools/apply_proposal.py` |
+
+| 2026-10-23 | **IC 监控收回本 bot**（用户明确：「我当时的决定是错误的，改回来，这个 icmonitor 完全由你控制」）：① `scheduler/registry.py` 的 `ic_monitor` 改回 `scheduled=True`（周一~周五 08:50，脚本 = 本仓库 `jobs/ic_signal_monitor.py --once`，失败告警回本机器人 1:1），新增 `ic_recheck`（09:20，`--once --triggers-only`，补 08:50 因数据滞后被拒判的情况），`ic_weekly` 改回周一 09:05；② 推送改回**本机器人 1:1**（`tools/dingtalk_push.push_markdown` / `push_image`）→ 钉钉署名是本机器人，不再是「py 小助手」群机器人，群推变成开关 `IC_PUSH_GROUP=1`；③ 状态/历史统一到本仓库 `var/ic/`，并把 MainToy 侧历史**并进来**（含 2026-10-22 那条抄底）→ 不重推，MainToy 侧旧状态文件改名归档 `*.retired-20261023.json`；④ `MainToy\autorun\autoworkflow.py` 删除拉起 IC 脚本的 Popen（留停用说明），`MainToy\finanCalc\ic_signal_monitor.py` 顶部加「已停用」头 → 两边不会双推；⑤ 调度器进程已重启加载新作业表 | `scheduler/registry.py`、`scheduler/config.py`、`jobs/ic_signal_monitor.py`、`jobs/ic_weekly_report.py`、`MainToy\autorun\autoworkflow.py`、`MainToy\finanCalc\ic_signal_monitor.py` |
 
 ---
 

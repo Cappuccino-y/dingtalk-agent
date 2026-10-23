@@ -8,12 +8,12 @@
 occurrence 就是「这次该在哪一刻跑」，也是去重键：
     2026-10-21T08:00   ← premarket 在 10-21 的计划时刻
 
-**IC 监控（抄底/顶部信号）已交回 MainToy 那条链**（2026-10-22）：
-`MainToy\autorun\autoworkflow.py` 拉起 `MainToy\finanCalc\ic_signal_monitor.py`（常驻模式），
-推送走 MainToy\tools\notifycation.py（py 小助手群 webhook）—— 不经本机器人的 1:1 通道。
-所以本仓库的 ic_monitor / ic_weekly **不参与定时**（scheduled=False），只留手动入口：
-它们指向**同一份脚本、同一份状态/历史文件**（IC_HOME），所以手动跑和那条链共用去重，
-同一条信号只会被推一次，不会双推。
+**IC 监控（抄底/顶部信号）归本 bot**（2026-10-23 从 MainToy 那条链收回）：
+用户明确「这个 icmonitor 完全由你控制」→ 启动、状态、去重、推送都归本仓库：
+- 定时：本仓库 `ic_monitor`(08:50) / `ic_recheck`(09:20) / `ic_weekly`(周一 09:05)
+- 脚本：`jobs/ic_signal_monitor.py`（状态/历史在 `var/ic/`，已并入 MainToy 那条链的历史）
+- 推送：**本机器人 1:1**（tools.dingtalk_push）→ 署名本机器人，不是「py 小助手」群机器人
+- `MainToy\autorun\autoworkflow.py` 已不再拉起 IC 脚本 → 不会双推
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
 
-from .config import IC_HOME, IC_SCRIPT, IC_WEEKLY_SCRIPT, PYTHON, REPO
+from .config import IC_SCRIPT, IC_WEEKLY_SCRIPT, PYTHON, REPO
 
 WEEKDAYS = (0, 1, 2, 3, 4)   # 周一~周五
 
@@ -48,8 +48,8 @@ class Job:
         return "%Y-%m-%dT%H:%M"
 
 
-# bot 自己的作业。IC 监控/周报 2026-10-22 起交回 MainToy 那条链（见模块头注释）：
-# 本仓库只保留**手动入口**（scheduled=False），定时由 autoworkflow 那条链负责。
+# bot 自己的作业。IC 监控/补判/周报 2026-10-23 起收回本 bot（见模块头注释）：
+# 定时、状态、去重、推送全部由本仓库负责。
 JOBS: list[Job] = [
     Job(
         id="premarket",
@@ -63,31 +63,43 @@ JOBS: list[Job] = [
         aliases=("早报", "premarket"),
         cwd=REPO,
     ),
-    # IC 信号监控：**只做手动入口**，定时由 MainToy\\autorun\\autoworkflow.py 负责。
-    # 两边跑的是同一份脚本、同一份状态/历史文件（IC_HOME），所以：
-    #   - 谁先跑谁推，状态文件保证当天只推一次（不会双推）；
-    #   - /ic 手动跑 = 立刻补一次判定，和那条链共用去重。
+    # IC 信号监控：**归本 bot**（2026-10-23 从 MainToy 那条链收回）。
+    # 08:50 主判：触发就推信号，没触发就推每日心跳日报。
+    # 去重靠脚本自己的历史文件（var/ic/ic_signal_history.json），
+    # 所以 09:20 补判、手动 /ic 都不会把同一条信号推两遍。
     Job(
         id="ic_monitor",
-        name="IC 信号监控（手动）",
-        # --triggers-only：手动跑只补「真信号」，不发每日心跳——
-        # 心跳由 autoworkflow 那条链的常驻进程发，状态文件不共享，
-        # 两边都发就会在群里刷两条一样的日报。
-        argv=[PYTHON, IC_SCRIPT, "--once", "--triggers-only"],
+        name="IC 信号监控",
+        argv=[PYTHON, IC_SCRIPT, "--once"],
         at=(8, 50),
         window_min=70,           # 8:50~10:00，和脚本原本的早盘窗口一致
         timeout_s=600,
         max_attempts=3,
         retry_delay_s=180,
-        scheduled=False,         # 不参与定时（定时归 autoworkflow 那条链）
-        notify_on_fail=False,    # IC 的事归那条链，失败不往本机器人 1:1 推卡
+        notify_on_fail=True,     # 失败往本机器人 1:1 推告警
         aliases=("ic", "IC监控", "IC信号"),
-        cwd=IC_HOME,
+        cwd=REPO,
     ),
-    # IC 周报：同上，只留手动入口（周一 09:05 那次由 autoworkflow 那条链负责）。
+    # 09:20 补判：08:50 那轮若因数据滞后被拒判（数据完整性守门），
+    # 这里再判一次，只补「真信号」不发心跳（--triggers-only）。
+    # 之前 MainToy 那条链是常驻进程每 10 分钟复查到 10:00；这里用一次补判等价收敛。
+    Job(
+        id="ic_recheck",
+        name="IC 信号补判",
+        argv=[PYTHON, IC_SCRIPT, "--once", "--triggers-only"],
+        at=(9, 20),
+        window_min=40,           # 9:20~10:00
+        dow=WEEKDAYS,
+        timeout_s=600,
+        max_attempts=2,
+        retry_delay_s=180,
+        notify_on_fail=True,
+        cwd=REPO,
+    ),
+    # IC 周报：周一 09:05 出图并推 1:1（用同一份收盘数据）。
     Job(
         id="ic_weekly",
-        name="IC 周报（手动）",
+        name="IC 周报",
         argv=[PYTHON, IC_WEEKLY_SCRIPT],
         at=(9, 5),               # 排在 IC 监控之后，用的是同一份收盘数据
         window_min=100,
@@ -95,10 +107,9 @@ JOBS: list[Job] = [
         timeout_s=900,
         max_attempts=2,
         retry_delay_s=300,
-        scheduled=False,         # 不参与定时
-        notify_on_fail=False,
+        notify_on_fail=True,
         aliases=("周报", "weekly"),
-        cwd=IC_HOME,
+        cwd=REPO,
     ),
     Job(
         id="evolve",

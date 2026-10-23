@@ -33,21 +33,21 @@
                                                           │ 到点 spawn（子进程）
                              ┌────────────────────────────┼────────────────────────┐
                              ▼                            ▼                        ▼
-                    premarket 08:00              evolve 09:20（窗口 12 小时）    ic_monitor /ic_weekly
-                    （盘前早报，跑完就退）        （知识/行为改进扫描；机器      （仅手动入口：IC 归
-                             │                    08:40 才开机，窗口拉长 =      MainToy\autorun\autoworkflow
-                             │                    当天开着就一定跑）            那条链管，见下）
+                     premarket 08:00              evolve 09:20（窗口 12 小时）    ic_monitor 08:50 / ic_recheck 09:20
+                    （盘前早报，跑完就退）        （知识/行为改进扫描；机器      （IC 抄底/摸顶信号，2026-10-23 起
+                              │                    08:40 才开机，窗口拉长 =      归本调度器；ic_weekly 周一 09:05
+                              │                    当天开着就一定跑）            出周报图）
                              │                             │                        │
                              └──────────► runs 表（SQLite）：状态/次数/耗时/日志尾巴 ┘
                                                   │
                                     失败 → notify.py（按 key 去重，只发一次）
 
-> **IC 监控（抄底/顶部信号 + 周报）不归本调度器管**（2026-10-22 起）：
-> 定时由 `MainToy\autorun\autoworkflow.py` 拉起 `MainToy\finanCalc\ic_signal_monitor.py`，
-> 推送走 MainToy 侧的 notify（py 小助手群 webhook）。
-> 本仓库的 `ic_monitor` / `ic_weekly` 只留**手动入口**（`/ic`、`/周报`），
-> 并且指向**同一份脚本、同一份状态/历史文件**（`IC_HOME`）——
-> 手动跑和那条链共用去重，同一条信号只会被推一次。
+> **IC 监控（抄底/顶部信号 + 周报）归本调度器管**（2026-10-23 从 MainToy 那条链收回）：
+> 定时作业 = `ic_monitor`（周一~周五 08:50）/ `ic_recheck`（09:20）/ `ic_weekly`（周一 09:05），
+> 脚本 = 本仓库 `jobs/ic_signal_monitor.py` / `jobs/ic_weekly_report.py`，
+> 状态/历史 = `var/ic/`（已并入 MainToy 侧历史，10-22 那条抄底不重推），
+> 推送 = **本机器人 1:1**（`tools/dingtalk_push`）→ 钉钉署名是本机器人，不是「py 小助手」群机器人。
+> `MainToy\autorun\autoworkflow.py` 已不再拉起 IC 脚本 → 不会双推。
 ```
 
 **两个常驻进程**：bot（钉钉连接）和 scheduler（时间表）。
@@ -108,14 +108,16 @@ scheduler/
 
 | 路径 | 内容 | 原来在哪 |
 |---|---|---|
-| `var/ic/` | IC 信号、最新信号、历史、每日去重状态、运行日志（**已停用**，真数据在 MainToy 侧） | `MainToy/finanCalc/` |
-| `var/weekly_reports/` | 周报 PNG（**已停用**） | `MainToy/finanCalc/weekly_reports/` |
+| `var/ic/` | IC 信号、最新信号、历史、每日去重状态、运行日志（**本 bot 权威副本**，2026-10-23 起） | `MainToy/finanCalc/` |
+| `var/weekly_reports/` | 周报 PNG（本 bot 权威副本） | `MainToy/finanCalc/weekly_reports/` |
 | `bot/bridge_data/` | 早报会话映射 + 推送时间戳 | `MainToy/finanCalc/bridge_data/` |
 
 > 迁移时把老仓库的 `ic_latest_signal.json` / `ic_signal_history.json` /
 > `premarket_last_sent.json` 一起搬过来了，所以**去重状态没断**——
 > 迁移当天 IC 监控照常判定「今天已推过」而没重复推送。
-> IC 交回 MainToy 侧时，2026-10-21 那次抄底信号的历史也并了过去，换链后不会重推。
+> 2026-10-23 IC 监控收回本 bot 时，又把 MainToy 侧的历史（2026-10-21 / 10-22 两条抄底）
+> 并进 `var/ic/ic_signal_history.json`，MainToy 侧旧状态文件改名归档为 `*.retired-20261023.json`
+> → 换链前后都不会重推同一条信号。
 
 > 顺带修掉一个老 bug：早报脚本原来把会话文件写到 `MainToy/finanCalc/bridge_data/`，
 > 而机器人（`bot/listen.py` 的 `BRIDGE_DATA_DIR`）读的是 `bot/bridge_data/`——

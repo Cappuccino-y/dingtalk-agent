@@ -1,13 +1,13 @@
 """
-IC 抄底信号周报（各 ETF 历史触发明细图表）—— **本副本已停用（2026-10-22）**
+IC 抄底信号周报（各 ETF 历史触发明细图表）—— **由本 bot 自主管理（2026-10-23 收回）**
 
-周报已交回 MainToy 那条链：`MainToy\autorun\autoworkflow.py` 拉起
-`MainToy\finanCalc\ic_signal_monitor.py`，周一 08:50 在链内生成周报 PNG
-（`MainToy\finanCalc\ic_weekly_report.py`），推送走 MainToy 侧 notify。
-本仓库只留**手动入口** `/周报`，指向同一份脚本（`IC_HOME`）→ 当日 PNG 幂等，不会重复发。
+周报整条链归本机器人：
+- 定时：本仓库调度器作业 `ic_weekly`（周一 09:05）
+- 推送：**本机器人 1:1 通道**（tools.dingtalk_push.push_image，图片内联显示）
+- 输出目录：本仓库 `var/weekly_reports/`（当日 PNG 幂等，不会重复发）
+- 手动入口：`/周报`（聊天）或 `python -m scheduler run ic_weekly`（命令行）
 
-⚠️ 不要单独跑这个文件：它写的是 `var/weekly_reports/` 下**另一套**输出目录，
-   和 MainToy 那条链不共享幂等状态 → 周报会被发两遍。
+MainToy 那条链（autoworkflow 拉起 finanCalc\ic_signal_monitor.py）已不再生成/推送周报。
 
 - 三个指数: 上证50(50etf QVIX) / 沪深300(300etf QVIX) / 中证500(500etf QVIX)
 - 每个触发日列出: 触发指标 + 后60交易日窗口最高/最低(入场=次日开盘价, 高低点=盘中HIGH/LOW)
@@ -246,8 +246,9 @@ def generate_and_send(force: bool = False):
         return out
     build_report_png(out)
     try:
-        from tools.notifycation import send_dingtalk_image
-        ok = send_dingtalk_image(str(out), title="IC抄底信号周报")
+        # 2026-10-23：改走本机器人 1:1 通道（图片内联），署名本机器人
+        from tools.dingtalk_push import push_image
+        ok = push_image(str(out), title="IC抄底信号周报")
         print(f"WEEKLY_REPORT:{out} sent={ok}")
     except Exception as e:
         print(f"WEEKLY_REPORT_SEND_FAIL:{e}")
