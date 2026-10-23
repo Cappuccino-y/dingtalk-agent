@@ -1,0 +1,20 @@
+{
+  "type": "memory",
+  "title": "IC Monitor 推送成功后不得因编码异常误报失败",
+  "scope": "project:dingtalk-agent",
+  "category": "gotcha",
+  "confidence": "high",
+  "body": "触发条件: ic_monitor 已成功推送信号，但进程继续向 Windows 控制台输出含 emoji 或其他非 ASCII 文本时发生编码异常。\n动作: 将面向下游的信号输出固定为纯 ASCII，并在模块入口把 stdout/stderr 统一设为 UTF-8 且 errors=\"replace\"；修复后使用 --once 验证退出码为 0，并依据实际推送结果记录成功，避免重试造成重复通知。\n适用范围: dingtalk-agent 的 ic_monitor 信号输出、推送状态判定和调度执行链路。",
+  "evidence": "❌ IC 信号监控（ic_monitor） 计划时刻：2026-10-22 08:50 结果：failed，退出码 1\n这个你看是什么情况\n全部修复",
+  "supersedes": "",
+  "risk": "调整控制台编码可能影响依赖当前本地编码的其他输出；下游信号保持纯 ASCII 可降低协议兼容风险。",
+  "expected_gain": "避免信号已经送达却被误判为失败，并减少失败重试导致的重复推送。",
+  "source": "evolve",
+  "proposed_by": "MiniMax-M3.1-Flash",
+  "id": "prop_20261023-092121_6e9c",
+  "created_at": "2026-10-23T01:21:21Z",
+  "status": "approved",
+  "card_pushed_ts": 1792718482.8483615,
+  "card_pushed_at": "2026-10-23T01:21:22Z",
+  "decided_at": "2026-10-23T02:40:11Z"
+}

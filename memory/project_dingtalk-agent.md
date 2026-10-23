@@ -151,3 +151,20 @@ source.agentIds: evolve, user-approved
 动作: 将卡片初始化回调与真实用户作答区分；每个审批步骤都必须等待有效用户选择，不得在用户尚未审批时推进下一阶段或显示“未看懂你的选择”，只有收到真实但无效的答复后才提示解析失败。
 适用范围: dingtalk-agent 的 Evolve 审批及 DingTalk 卡片回调处理。
 
+---
+memoryId: mem_3aef672e_23211
+timestamp: 2026-10-23T02:40:11Z
+scope: project:dingtalk-agent
+category: gotcha
+title: IC Monitor 推送成功后不得因编码异常误报失败
+tags: [evolve]
+confidence: high
+trust: self
+source.messageIds: card:oc-e3cb360ac9594c8ea819, session:ses_e9ec03994ffe8wp922KMVDvSAF, card:oc-8f813219435644718c7a, session:ses_e9ec03994ffe8wp922KMVDvSAF, proposal:prop_20261023-092121_6e9c
+source.agentIds: evolve, user-approved
+---
+
+触发条件: ic_monitor 已成功推送信号，但进程继续向 Windows 控制台输出含 emoji 或其他非 ASCII 文本时发生编码异常。
+动作: 将面向下游的信号输出固定为纯 ASCII，并在模块入口把 stdout/stderr 统一设为 UTF-8 且 errors="replace"；修复后使用 --once 验证退出码为 0，并依据实际推送结果记录成功，避免重试造成重复通知。
+适用范围: dingtalk-agent 的 ic_monitor 信号输出、推送状态判定和调度执行链路。
+
