@@ -653,3 +653,9 @@ IC 监控**已经加进去了**，现在是调度器里的第二个作业：
 - supersedes: -
 - evidence_refs: card:oc-e3cb360ac9594c8ea819, session:ses_e9ec03994ffe8wp922KMVDvSAF, card:oc-8f813219435644718c7a, session:ses_e9ec03994ffe8wp922KMVDvSAF
 
+## 2026-10-23T14:36:39 — stop
+- Summary: 用户反馈：stop
+- conv: cidwKuyECv5z+YK5cPBDeiA3wT/FKag4TRfj0dqHzRfrDk=
+- session: ses_e995e5056ffeXgtH0GyVqrZFfh
+- detail: 用户中断了这一轮
+

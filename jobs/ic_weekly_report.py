@@ -81,11 +81,25 @@ def load_margin_full():
     return pd.concat(frames).drop_duplicates("date").sort_values("date").reset_index(drop=True)
 
 
+def _fetch_qvix_retry(qvix_type: str, tries: int = 3):
+    """akshare 的 QVIX 接口偶发失败（2026-10-23 就遇到一次）→ 重试几次。"""
+    import time as _t
+    last = None
+    for i in range(tries):
+        try:
+            return fetch_qvix(qvix_type)
+        except Exception as e:  # noqa: BLE001
+            last = e
+            print(f"QVIX({qvix_type}) 第 {i+1} 次拉取失败: {e}", flush=True)
+            _t.sleep(3 * (i + 1))
+    raise RuntimeError(f"QVIX({qvix_type}) 连续 {tries} 次拉取失败: {last}")
+
+
 def load_index(symbol, qvix_type, margin):
     spot = ak.stock_zh_index_daily(symbol=symbol)
     spot["date"] = pd.to_datetime(spot["date"])
     spot = spot.rename(columns={"close": "spot"}).sort_values("date").reset_index(drop=True)
-    qvix = fetch_qvix(qvix_type)
+    qvix = _fetch_qvix_retry(qvix_type)
     qvix["date"] = pd.to_datetime(qvix["date"])
     df = spot[["date", "spot", "open", "high", "low"]].merge(qvix[["date", "close"]], on="date", how="left")
     df = df.rename(columns={"close": "qvix"}).merge(margin, on="date", how="left")
@@ -98,18 +112,36 @@ def load_index(symbol, qvix_type, margin):
     df["v60"] = np.log(df["spot"] / df["spot"].shift(1)).rolling(60).std() * np.sqrt(252) * 100
     df["m20"] = df["margin"].pct_change(20, fill_method=None)
     df["trig"] = (df["rsi14"] < RSI_TH) & (df["q5"] < QVIX_TH) & (df["v60"] > VOL_TH) & (df["m20"] < 0)
+    # 规则 2（与 ic_signal_monitor 同源）：长假前夜的触发顺延到节后第一个交易日重判
+    from ic_signal_monitor import pre_long_holiday_dates
+    pre = pre_long_holiday_dates()
+    df["deferred_from"] = ""
+    for i in range(len(df)):
+        if not bool(df["trig"].iloc[i]):
+            continue
+        d = df["date"].iloc[i].date()
+        if d not in pre:
+            continue
+        df.loc[i, "trig"] = False
+        if i + 1 < len(df):
+            df.loc[i + 1, "deferred_from"] = df["date"].iloc[i].strftime("%Y-%m-%d")
     return df
 
 
 def collect_rows(df):
-    """每个触发日一行: 指标 + 窗口最高/最低 + 最高点+N自然日"""
+    """每个触发日一行: 指标 + 窗口最高/最低 + 最高点+N自然日 + 强度/顺延标注"""
     n = len(df)
     rows = []
     for fi in df.index[df["trig"]]:
         ni = fi + 1
         r = df.loc[fi]
+        # 强度分级（与 ic_signal_monitor 同源）：融资20日 ≤-3% = 强
+        m20 = r["m20"]
+        strength = "强" if (pd.notna(m20) and m20 <= -0.03) else "弱"
         row = {"date": r["date"], "spot": r["spot"], "rsi": r["rsi14"],
-               "q5": r["q5"], "v60": r["v60"], "m20": r["m20"],
+               "q5": r["q5"], "v60": r["v60"], "m20": m20,
+               "strength": strength,
+               "deferred_from": r.get("deferred_from", "") if "deferred_from" in df.columns else "",
                "mx": np.nan, "mx_lag": np.nan, "mn": np.nan, "open": np.nan}
         if ni < n:
             entry = df.loc[ni, "open"]
@@ -153,13 +185,17 @@ def render_table(ax, name, rows, y0):
         mx_color = "#c0392b" if pd.notna(mx) and mx >= 0.10 else ("#e67e22" if pd.notna(mx) and mx >= 0.05 else "#7f8c8d")
         q5_color = "#27ae60" if pd.notna(r["q5"]) and r["q5"] < -0.20 else "#2c3e50"
         star = "" if complete else " *"
+        strong = r.get("strength", "弱") == "强"
+        deferred = r.get("deferred_from", "") or ""
+        date_txt = r["date"].strftime("%Y-%m-%d") + (" ⟲" if deferred else "")
+        m20_txt = _fmt_pct(r["m20"]) + (" 强" if strong else " 弱")
         vals = [
-            r["date"].strftime("%Y-%m-%d"),
+            date_txt,
             f"{r['spot']:.0f}",
             f"{r['rsi']:.1f}",
             _fmt_pct(r["q5"]),
             f"{r['v60']:.0f}%",
-            _fmt_pct(r["m20"]),
+            m20_txt,
             f"{r['open']:.0f}" if pd.notna(r["open"]) else "--",
             (_fmt_pct(mx) + star),
             (f"+{lag:.0f}d" if pd.notna(lag) else "--"),
@@ -169,13 +205,15 @@ def render_table(ax, name, rows, y0):
             ax.add_patch(plt.Rectangle((0, y0 - 0.45), 1, 0.9, color="#f5f6fa", zorder=0))
         if not complete:
             ax.add_patch(plt.Rectangle((0, y0 - 0.45), 1, 0.9, color="#fdf6ec", alpha=0.7, zorder=0))
+        if deferred:
+            ax.add_patch(plt.Rectangle((0, y0 - 0.45), 1, 0.9, color="#eaf4fb", alpha=0.8, zorder=0))
         texts = [
-            (r["date"].strftime("%Y-%m-%d"), "#2c3e50"),
+            (date_txt, "#2c3e50"),
             (f"{r['spot']:.0f}", "#2c3e50"),
             (f"{r['rsi']:.1f}", "#2c3e50"),
             (_fmt_pct(r["q5"]), q5_color),
             (f"{r['v60']:.0f}%", "#2c3e50"),
-            (_fmt_pct(r["m20"]), "#2c3e50"),
+            (m20_txt, "#16a085" if strong else "#7f8c8d"),
             (f"{r['open']:.0f}" if pd.notna(r["open"]) else "--", "#2c3e50"),
             (_fmt_pct(mx) + star, mx_color),
             (f"+{lag:.0f}d" if pd.notna(lag) else "--", "#8e44ad"),
@@ -209,7 +247,8 @@ def build_report_png(out_path: Path) -> Path:
             color="#1a1a2e", va="top")
     y -= 1.2
     ax.text(0.01, y, f"生成: {now.strftime('%Y-%m-%d %H:%M')}  |  RSI<44 + QVIX5d<-3% + 60d波动>20% + 融资20日降  |  "
-                     f"* = 窗口未走完(当前值)  |  最高点=盘中HIGH相对次日开盘价",
+                     f"* = 窗口未走完(当前值)  |  最高点=盘中HIGH相对次日开盘价  |  "
+                     f"强/弱=融资20日动量分级(≤-3%强)  |  ⟲=节前触发已顺延到该日重判",
             fontsize=8, color="#7f8c8d", va="top")
     y -= 1.6
 
@@ -223,7 +262,8 @@ def build_report_png(out_path: Path) -> Path:
 
     # 汇总统计
     y -= 0.5
-    ax.text(0.01, y, "汇总（窗口已满样本）", fontsize=11, fontweight="bold", va="top")
+    ax.text(0.01, y, "汇总（窗口已满样本；指标 = 60 交易日窗口内最高价相对次日开盘价，不是 20 日收益）",
+            fontsize=11, fontweight="bold", va="top")
     y -= 1.2
     for name, _, _ in INDEXES:
         done = [r for r in all_data[name] if r.get("complete")]
@@ -231,7 +271,7 @@ def build_report_png(out_path: Path) -> Path:
             continue
         mx = pd.Series([r["mx"] for r in done])
         lag = pd.Series([r["mx_lag"] for r in done])
-        ax.text(0.03, y, f"{name}: n={len(done)}  最高>0: {(mx>0).mean():.0%}  ≥+5%: {(mx>=0.05).mean():.0%}  "
+        ax.text(0.03, y, f"{name}: n={len(done)}  窗口最高>0: {(mx>0).mean():.0%}  ≥+5%: {(mx>=0.05).mean():.0%}  "
                          f"均值 {mx.mean():+.1%}  中位 {mx.median():+.1%}  |  最高点>60自然日: {(lag>60).mean():.0%}",
                 fontsize=8.5, va="top", color="#2c3e50")
         y -= 1.0

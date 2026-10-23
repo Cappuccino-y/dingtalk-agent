@@ -292,6 +292,8 @@ def prepare_signals(df: pd.DataFrame) -> pd.DataFrame:
 # 判断长假前夜必须查交易日历（akshare 一次拉全量，缓存 6 小时）。
 _TRADE_CAL: set | None = None
 _TRADE_CAL_TS: float = 0.0
+_PRE_HOLIDAY: set | None = None
+_PRE_HOLIDAY_TS: float = 0.0
 
 LONG_HOLIDAY_GAP_DAYS = 4   # 数据日 -> 下一个交易日 的自然日间隔 >= 4 → 后面紧跟长假
 
@@ -313,25 +315,34 @@ def _trade_calendar() -> set:
         return set()
 
 
-def is_pre_long_holiday(d) -> bool:
-    """这个交易日是不是"长假前夜"（后面紧跟 >=3 天连续休市）。
+def pre_long_holiday_dates() -> set:
+    """所有"长假前夜"的交易日（集合，缓存 6 小时）。
 
     判据：下一个交易日 - 该交易日 >= 4 个自然日
     （普通周末 = 3 天：周五→周一；长假前夜 >= 4 天，如中秋前的周四→下周一）。
+    批量场景（回测/周报）用这个集合，别逐行调 is_pre_long_holiday。
+    """
+    global _PRE_HOLIDAY, _PRE_HOLIDAY_TS
+    now = time.time()
+    if _PRE_HOLIDAY is not None and now - _PRE_HOLIDAY_TS < 6 * 3600:
+        return _PRE_HOLIDAY
+    cal = sorted(_trade_calendar())
+    out = {d for i, d in enumerate(cal[:-1])
+           if (cal[i + 1] - d).days >= LONG_HOLIDAY_GAP_DAYS}
+    _PRE_HOLIDAY, _PRE_HOLIDAY_TS = out, now
+    return out
+
+
+def is_pre_long_holiday(d) -> bool:
+    """这个交易日是不是"长假前夜"（后面紧跟 >=3 天连续休市）。
 
     为什么要有这条：2026-09-24（中秋前最后一个交易日）那次抄底是假信号 ——
     当天指数 -2.15% 是节前流动性枯竭的抛售、QVIX 几乎没定价（23.30→23.98），
     而"5日动量 -7.38%"测的是 6 天前一轮**反弹期**的恐慌溢价消退。
     节后第一个交易日重判时（09-28~10-09 连续 5 日）条件都不成立 → 这次信号就不该发。
     """
-    cal = _trade_calendar()
-    if not cal:
-        return False
     d0 = d.date() if hasattr(d, "date") else d
-    later = [x for x in cal if x > d0]
-    if not later:
-        return False
-    return (min(later) - d0).days >= LONG_HOLIDAY_GAP_DAYS
+    return d0 in pre_long_holiday_dates()
 
 
 # ------------------------------------------------------------ 信号强度分级

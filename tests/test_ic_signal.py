@@ -101,6 +101,12 @@ class TestPreHolidayDeferral(unittest.TestCase):
             pd.Timestamp("2026-10-09").date(),
         })
         self._cal.start()
+        # 清掉模块级缓存（交易日历 / 长假前夜集合），保证用打桩的日历
+        icm._TRADE_CAL = None
+        icm._TRADE_CAL_TS = 0.0
+        icm._PRE_HOLIDAY = None
+        icm._PRE_HOLIDAY_TS = 0.0
+        self.addCleanup(self._cal.stop)
 
     def tearDown(self):
         self._cal.stop()
@@ -159,6 +165,11 @@ class TestRunOnceBehaviour(unittest.TestCase):
         for p in patches:
             p.start()
             self.addCleanup(p.stop)
+        # 清掉模块级缓存（交易日历 / 长假前夜集合），保证用打桩的日历
+        icm._TRADE_CAL = None
+        icm._TRADE_CAL_TS = 0.0
+        icm._PRE_HOLIDAY = None
+        icm._PRE_HOLIDAY_TS = 0.0
 
     def tearDown(self):
         self.tmp.cleanup()
