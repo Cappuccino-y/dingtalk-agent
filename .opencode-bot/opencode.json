@@ -25,7 +25,17 @@
     {
       "action": "external_directory",
       "resource": "*",
-      "effect": "deny"
+      "effect": "allow"
+    },
+    {
+      "action": "read",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "edit",
+      "resource": "*",
+      "effect": "allow"
     },
     {
       "action": "question",
