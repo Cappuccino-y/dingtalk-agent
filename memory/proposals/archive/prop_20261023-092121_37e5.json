@@ -1,0 +1,20 @@
+{
+  "type": "memory",
+  "title": "Evolve 作业应避开凌晨并在开机后补跑",
+  "scope": "project:dingtalk-agent",
+  "category": "decision",
+  "confidence": "high",
+  "body": "触发条件: 调度 Evolve 作业，且用户机器通常在 08:40 后才开机。\n动作: 不再把 Evolve 安排在 03:00；改为用户开机后的上午时段（当前配置 09:20），并设置覆盖当天的补跑窗口，使晚开机时仍能执行且同一 occurrence 只跑一次。\n适用范围: dingtalk-agent 的 scheduler/registry.py 中 evolve 作业及其补跑逻辑。",
+  "evidence": "我这台电脑是每天早上8:40才开机，所以每天3点跑肯定是有问题的。这个得换一下，我觉得是不是得换到中午或者开机启动后开始跑？不过中午定时跑比较合适是吧？",
+  "supersedes": "",
+  "risk": "若电脑全天未开机仍会错过当日任务；较长的补跑窗口也可能使任务在用户较晚开机时执行。",
+  "expected_gain": "避免凌晨任务因机器尚未开机而无故失败，同时保证晚开机后仍能执行。",
+  "source": "evolve",
+  "proposed_by": "MiniMax-M3.1-Flash",
+  "id": "prop_20261023-092121_37e5",
+  "created_at": "2026-10-23T01:21:21Z",
+  "status": "approved",
+  "card_pushed_ts": 1792718482.844802,
+  "card_pushed_at": "2026-10-23T01:21:22Z",
+  "decided_at": "2026-10-23T02:40:08Z"
+}

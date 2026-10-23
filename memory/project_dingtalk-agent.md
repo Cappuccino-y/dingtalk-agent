@@ -117,3 +117,20 @@ source.agentIds: evolve, user-approved
 动作: 只处理该项目自身代码；不要擅自修改 autoworkflow.py，将其视为已知可用的既有实现，除非用户后续明确要求。
 适用范围: dingtalk-agent 的代码维护及与 MainToy/autoworkflow.py 的协作边界。
 
+---
+memoryId: mem_d5523115_23208
+timestamp: 2026-10-23T02:40:08Z
+scope: project:dingtalk-agent
+category: decision
+title: Evolve 作业应避开凌晨并在开机后补跑
+tags: [evolve]
+confidence: high
+trust: self
+source.messageIds: card:oc-6d92034967cd400dbd40, session:ses_ea068f460ffel74aIKhwciWQBC, proposal:prop_20261023-092121_37e5
+source.agentIds: evolve, user-approved
+---
+
+触发条件: 调度 Evolve 作业，且用户机器通常在 08:40 后才开机。
+动作: 不再把 Evolve 安排在 03:00；改为用户开机后的上午时段（当前配置 09:20），并设置覆盖当天的补跑窗口，使晚开机时仍能执行且同一 occurrence 只跑一次。
+适用范围: dingtalk-agent 的 scheduler/registry.py 中 evolve 作业及其补跑逻辑。
+
