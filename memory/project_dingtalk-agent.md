@@ -134,3 +134,20 @@ source.agentIds: evolve, user-approved
 动作: 不再把 Evolve 安排在 03:00；改为用户开机后的上午时段（当前配置 09:20），并设置覆盖当天的补跑窗口，使晚开机时仍能执行且同一 occurrence 只跑一次。
 适用范围: dingtalk-agent 的 scheduler/registry.py 中 evolve 作业及其补跑逻辑。
 
+---
+memoryId: mem_87af8b34_23211
+timestamp: 2026-10-23T02:40:11Z
+scope: project:dingtalk-agent
+category: gotcha
+title: Evolve 多阶段审批必须等待真实用户选择
+tags: [evolve]
+confidence: high
+trust: self
+source.messageIds: card:oc-0b2e59dadc9b400da3e2, session:ses_e9eabefcbffeSUtMRjnb2fHOq1, proposal:prop_20261023-092121_31ad
+source.agentIds: evolve, user-approved
+---
+
+触发条件: DingTalk 卡片回调携带 evolve 的 question_id，尤其是参数 fromConfig 为空的卡片初始化回调。
+动作: 将卡片初始化回调与真实用户作答区分；每个审批步骤都必须等待有效用户选择，不得在用户尚未审批时推进下一阶段或显示“未看懂你的选择”，只有收到真实但无效的答复后才提示解析失败。
+适用范围: dingtalk-agent 的 Evolve 审批及 DingTalk 卡片回调处理。
+
