@@ -148,6 +148,52 @@ def mark_down(reason: str = "") -> None:
     _update(down_since=time.time(), down_reason=reason or "")
 
 
+def mark_planned_stop(reason: str = "") -> None:
+    """记下「计划内停机」（重启 / 关机）。
+
+    区别于崩溃：开机时按「计划内停机」播报，而不是「意外掉线」——
+    用户看到的是自己刚安排的事，就不用再猜是不是炸了。
+    """
+    _update(announced_at=time.time(), announced_reason=reason or "")
+
+
+def push_shutdown_notice(reason: str = "", delay: int = 90, mode: str = "force") -> bool:
+    """【要关机】推一条离线预告 —— **必须在断电之前送达**。
+
+    为什么单独一个函数（而不是复用重启那条）：
+    - 重启是「10 秒后回来」，关机可能是「今晚才回来」，用户该知道的差别很大；
+    - 关机有**兜底倒计时**（Windows /t），bot 万一崩了机器照样会关，
+      所以这条通知必须在关机前推出去，否则用户可能压根不知道发生过什么；
+    - 顺便把「关机期间消息不补发」讲清楚（钉钉不缓存离线消息）。
+    """
+    st = _load()
+    now = time.time()
+    last = float(st.get("shutdown_announced_at") or 0)
+    if last and (now - last) < 60:
+        return False                      # 60 秒内不重复喊
+    _update(shutdown_announced_at=now,
+            shutdown_announced_reason=reason or "",
+            shutdown_announced_delay=int(delay or 0))
+    text = (f"🔌 **电脑即将关机**\n\n"
+            f"- 原因：{reason or '用户指令'}\n"
+            f"- 倒计时：约 {int(delay or 0)} 秒兜底断电（当前这轮跑完就立刻关）\n"
+            f"- 模式：{'温和（应用自己收尾）' if mode == 'grace' else '强制（未保存内容会丢）'}\n\n"
+            f"机器人、调度器会一起停。**开机后我会自动恢复**，并推一条「已恢复」。\n\n"
+            f"关机期间发给我的消息**我收不到**（钉钉不补发离线消息），"
+            f"开机后重发一次就行。")
+    _push(text, "电脑即将关机")
+    return True
+
+
+def shutdown_pending() -> bool:
+    """有没有待处理的关机（读 tools/bot_shutdown.py 写的同一个标记）。"""
+    try:
+        from tools import bot_shutdown
+        return bool(bot_shutdown.shutdown_pending())
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def on_start(was_restart: bool | None = None, push: bool = True) -> dict:
     """【起来了】算出上一进程停了多久，必要时推「已恢复」。
 
@@ -159,7 +205,9 @@ def on_start(was_restart: bool | None = None, push: bool = True) -> dict:
     prev_alive = float(st.get("last_alive") or 0)
     announced = bool(st.get("announced_at"))
     announced_reason = st.get("announced_reason") or ""
-    reason = "重启" if (was_restart or announced) else "掉线"
+    # 「计划内停机」= 重启 **或** 关机（都是我们主动安排的）；
+    # 「意外掉线」= 崩了/被杀了 —— 用户得知道这次是哪种，不然每次都在猜。
+    reason = "计划内停机" if (was_restart or announced) else "意外掉线"
     gap = (now - prev_alive) if prev_alive else 0.0
     if gap < 0:
         gap = 0.0
@@ -173,8 +221,8 @@ def on_start(was_restart: bool | None = None, push: bool = True) -> dict:
 
     should_notify = bool(prev_alive) and (gap >= MIN_NOTIFY_SECONDS or announced)
     if should_notify and push:
-        why = (f"计划内重启" + (f"（{announced_reason}）" if announced_reason else "")
-               if reason == "重启" else "意外掉线")
+        why = (f"计划内停机" + (f"（{announced_reason}）" if announced_reason else "")
+               if reason == "计划内停机" else "意外掉线")
         text = (f"✅ **机器人已恢复**\n\n"
                 f"- 状态：{why}\n"
                 f"- 中断：约 {_fmt(gap)}\n"
@@ -183,7 +231,7 @@ def on_start(was_restart: bool | None = None, push: bool = True) -> dict:
                 f"如果有没回音的，重发一次就行。")
         info["notified"] = _push_async(text, "机器人已恢复")
         _set_pending_note(
-            f"⚠️ 刚才机器人{('重启' if reason == '重启' else '掉线')}过，"
+            f"⚠️ 刚才机器人{('计划内停机' if reason == '计划内停机' else '掉线')}过，"
             f"中断约 {_fmt(gap)}（{_hhmm(now)} 恢复）。\n\n"
             f"这段时间发的消息我没收到，如果上面那条没回音，重发一次就行。")
 
@@ -262,6 +310,16 @@ def status_line() -> str:
         lines.append(f"- 最近停机：约 {_fmt(down.get('seconds') or 0)}"
                      f"（{down.get('reason') or '-'}，{down.get('ended_at_str') or '-'} 恢复）")
     lines.append(f"- 进程：pid {st.get('pid') or '-'}")
+    # 待关机：看得见才敢撤销
+    try:
+        from tools import bot_shutdown
+        req = bot_shutdown.shutdown_request()
+    except Exception:  # noqa: BLE001
+        req = None
+    if req:
+        left = float(req.get("delay") or 0) - (time.time() - float(req.get("requested_at") or 0))
+        lines.append(f"- ⚠️ **待关机**：约 {int(max(0, left))} 秒"
+                     f"（{req.get('reason') or '用户指令'}）→ `/取消关机`")
     return "\n".join(lines)
 
 

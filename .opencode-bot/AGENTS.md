@@ -223,7 +223,29 @@
 
 ---
 
-## 七、改代码前先读架构手册
+## 七、关机（同样别把自己先杀掉）
+
+用户说「关机」时，**不要**直接调 `shutdown /s /t 0`，也不要 kill 监听进程 ——
+那会把正在渲染的卡片砍成僵尸卡（跟第六节同一个坑）。
+
+正确做法（协同关机）：
+
+    python D:\PythonProject\dingtalk-agent\tools\bot_shutdown.py --schedule 90 --reason "用户指令"
+
+它只做两件事：写关机标记 + 起 Windows 兜底倒计时。真正的断电由监听进程里的
+shutdown watcher 执行 —— **排空在飞回合 → 推一条「电脑即将关机」→ 才断电**。
+
+要点：
+- 关机窗口内可撤销：`python tools\bot_shutdown.py --abort`（= 删标记 + `shutdown /a`），
+  用户在钉钉发 `/取消关机` 也一样。
+- Windows 的 `shutdown /t > 0` **隐含 `/f`**：定时关机一定会强杀应用，
+  没保存的内容会丢。要温和收尾得用 `--grace`（`/t 0` 不带 `/f`，但会弹窗等人确认）。
+- 关机期间钉钉**不补发**消息；开机后机器人自动恢复并推「已恢复（中断 N 小时）」。
+- 别在关机后还去动机器上的文件 —— 断电会打断写操作。
+
+---
+
+## 八、改代码前先读架构手册
 
 **结构 / 进程 / 卡片链路 / 改动史 / 要改哪儿** 全部在
 `D:\PythonProject\dingtalk-agent\docs\bot-architecture.md`。

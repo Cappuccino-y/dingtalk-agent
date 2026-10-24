@@ -17,10 +17,13 @@
 - **手机端无法应答交互项**：question 工具在配置里 deny；权限请求 /
   question 表单由桥接层自动代答（低风险放行、其余拒绝并提示用户）。
 - **并发保护**：同一会话串行化，同时最多 BOT_MAX_CONCURRENT 个任务。
-- **命令**：/new /clear /sid /model /stop /compact /fork /restart /help。
+- **命令**：/new /clear /sid /model /stop /compact /fork /restart /shutdown /help。
 - **重启方式**：协同重启——/restart 或 tools/bot_restart.py 只写「重启标记」，
   监听进程在**当前这一轮跑完、卡片收尾之后**才退出，由看门狗拉起。
   **绝不在自己这一轮里 kill 自己**（那会把正在渲染的卡片变成僵尸卡）。
+- **关机方式**：协同关机——/shutdown 或 tools/bot_shutdown.py 只写「关机标记」
+  并起 Windows 兜底倒计时；监听进程排空在飞回合、推一条「电脑即将关机」
+  通知后才断电。关机前先告别、关机窗口可撤销（/取消关机 = shutdown /a）。
 - **重启找回**：在飞回合（含卡片 id）登记在 bridge_data/inflight.json；
   新进程启动时把遗留卡片收尾（补上真实回答或标注「重启前未完成」）。
 - **状态告知**：停机期间钉钉不会补发消息，所以三个时间点主动推通知
@@ -66,6 +69,7 @@ from dingtalk_stream.card_callback import (  # noqa: E402
 from dingtalk_stream.handlers import CallbackHandler  # noqa: E402
 
 from tools import bot_presence  # noqa: E402
+from tools import bot_shutdown  # noqa: E402
 from tools.opencode_bridge import (  # noqa: E402
     CARD_V2_OK, MODEL_CHOICES, AgentTurn, OpenCodeService,
     SessionMap, TurnGate, apply_instructions, card_v2, clear_restart,
@@ -270,6 +274,8 @@ def get_help_message() -> str:
         "`/model` 切换模型（点选即可：MiniMax 3.1 / DeepSeek 4.1 Flash / GLM 5.3 Flash）\n"
         "`/stop` 打断正在跑的任务　`/compact` 压缩上下文　"
         "`/fork` 复制一份上下文另开　`/restart` 重启机器人\n"
+        "`/shutdown` 关机（可带秒数，如 `/shutdown 120`）　"
+        "`/取消关机` 撤销关机\n"
         "`/status` 看在线状态 / 最近一次停机　`/jobs` 看定时作业跑没跑\n"
         "`/run <作业> [参数]` 手动跑一次（快捷 `/ic` `/早报` `/周报`）\n"
         "`/help` 帮助\n\n"
@@ -284,9 +290,11 @@ class BridgeHandler(ChatbotHandler):
         self.log = log or logger
         self._rate_hits: dict[str, list] = {}
         self._rate_lock = threading.Lock()
-        # 排空标记：重启请求已排入时置 True，期间不再接新任务，
-        # 等在飞回合跑完再退出（协同重启）。
+        # 排空标记：重启/关机请求已排入时置 True，期间不再接新任务，
+        # 等在飞回合跑完再退出（协同重启）/ 再断电（协同关机）。
         self.draining = False
+        # 排空的原因（restart / shutdown）—— 用来给用户不同的提示文案
+        self.draining_reason = ""
         # 最近一条消息（供卡片「重试」按钮重放用；卡片回调里没有 msg 对象）
         self.last_msg: dict = {}
 
@@ -378,10 +386,18 @@ class BridgeHandler(ChatbotHandler):
             return AckMessage.STATUS_OK, "OK"
 
         if self.draining:
-            self.reply_markdown(
-                "重启中",
-                "🔄 机器人正在重启，约 10 秒后再发。\n\n"
-                "（重启会清空对话上下文，原设计如此）", msg)
+            # 排空中：重启和关机要分开说 —— 用户需要的下一步动作完全不同
+            if self.draining_reason == "shutdown":
+                self.reply_markdown(
+                    "关机中",
+                    "🔌 电脑正在关机，这一轮跑完就断电。\n\n"
+                    "开机后我会自动恢复；这段时间发的消息**我收不到**"
+                    "（钉钉不补发），重发一次就行。", msg)
+            else:
+                self.reply_markdown(
+                    "重启中",
+                    "🔄 机器人正在重启，约 10 秒后再发。\n\n"
+                    "（重启会清空对话上下文，原设计如此）", msg)
             return AckMessage.STATUS_OK, "OK"
 
         # 刚重启/刚掉线恢复：先补一句状态，别让用户以为消息石沉大海。
@@ -553,6 +569,35 @@ class BridgeHandler(ChatbotHandler):
                 + "\n\n机器人会在本轮回答发完、卡片收尾之后自行退出，"
                 "由看门狗重新拉起（约 10 秒断线）。\n\n"
                 "⚠️ 重启会清空对话上下文（原设计如此）。",
+                msg)
+            return AckMessage.STATUS_OK, "OK"
+
+        if low in ("/shutdown", "/关机"):
+            # 协同关机：只写标记 + 起 Windows 兜底倒计时，
+            # 真正的「排空 → 告别 → 断电」由 shutdown watcher 执行。
+            delay = bot_shutdown.DEFAULT_DELAY
+            parts = text.split()
+            if len(parts) > 1 and parts[1].isdigit():
+                delay = max(5, int(parts[1]))
+            req = bot_shutdown.request_shutdown(
+                delay=delay, reason=f"用户 {staff} 发送 /shutdown", by=staff)
+            self.reply_markdown(
+                "关机",
+                f"🔌 已排入关机（兜底倒计时 {delay} 秒）。\n\n"
+                f"- 当前这一轮跑完、卡片收尾后立刻断电\n"
+                f"- 关机前会推一条「电脑即将关机」通知\n"
+                f"- 机器人/调度器会一起停，**开机后自动恢复**\n\n"
+                f"关机期间发的消息**我收不到**（钉钉不补发）。\n"
+                f"反悔：`/取消关机`（或电脑上 `shutdown /a`）。",
+                msg)
+            return AckMessage.STATUS_OK, "OK"
+
+        if low in ("/cancel-shutdown", "/取消关机", "/cancelshutdown"):
+            ok, why = bot_shutdown.abort_shutdown(by=staff)
+            self.reply_markdown(
+                "取消关机",
+                ("✅ " if ok else "ℹ️ ") + why + "\n\n"
+                "机器不会关机，机器人继续在线。",
                 msg)
             return AckMessage.STATUS_OK, "OK"
 
@@ -797,6 +842,111 @@ def start_restart_watcher(handler, log):
     log.info("已就绪：/restart 或 tools/bot_restart.py 可触发协同重启")
 
 
+def perform_shutdown(handler, client, log, req, shutdown_fn=None,
+                     settle_s: float = 5.0, finalize_cards: bool = False):
+    """关机前的收尾：收尾遗留卡片 → 记停机起点 → 断电。
+
+    抽成独立函数是为了**能测**：真正断电的动作通过 shutdown_fn 注入，
+    测试时换成假的，就能验证整条链路而不动真机器。
+
+    shutdown_fn:  断电动作（默认 bot_shutdown.execute_now）。
+    settle_s:     给钉钉投递通知留的时间（测试时设 0）。
+    finalize_cards: 是否收尾卡住的回合。**默认 False** ——
+        在飞登记表是磁盘上的共享文件，收尾动作会打到**别的进程**的卡上
+        （2026-10-24 的自测就误收尾了线上正在渲染的那张卡）。
+        只有「排空超时、必须强切」时才开，且只收尾**本进程**的回合。
+    """
+    # 1) 万一还有卡住的回合：把它们收尾，别留永远转圈的卡
+    #    （只动本进程的回合；别人的卡不许碰）
+    if finalize_cards:
+        try:
+            recover_inflight(client, log, only_pid=os.getpid())
+        except Exception as e:  # noqa: BLE001
+            log.warning("关机前收尾遗留卡片失败：%s", e)
+    # 2) 记停机起点 + 标记「计划内停机」→ 开机时按计划内播报，而不是「掉线」
+    try:
+        bot_presence.mark_down(req.get("reason") or "用户主动关机")
+        bot_presence.mark_planned_stop(req.get("reason") or "用户主动关机")
+    except Exception as e:  # noqa: BLE001
+        log.warning("记录停机起点失败：%s", e)
+    # 3) 多等一拍：通知刚推出去，给钉钉投递时间
+    if settle_s:
+        time.sleep(settle_s)
+    # 4) 断电
+    fn = shutdown_fn or bot_shutdown.execute_now
+    log.info("关机执行中：调用 shutdown /s /t 0 /f")
+    try:
+        ok, msg = fn()
+        log.info("关机命令已发出：ok=%s %s", ok, msg)
+        return bool(ok)
+    except Exception as e:  # noqa: BLE001
+        log.warning("调用关机命令失败：%s", e)
+        return False
+
+
+def start_shutdown_watcher(handler, client, log):
+    """后台线程：看到关机标记 → 排空 → 告别 → 断电。
+
+    顺序照「优雅终止」的通行做法来（先别收新活，再告别，最后断电）：
+      1. draining = True           —— 拒收新任务（用户会看到「关机中」）
+      2. 推关机预告                —— **必须在断电之前送达**，否则用户不知道发生过什么
+      3. 等在飞回合跑完（有上限）    —— 别把正在渲染的卡片砍成僵尸卡
+      4. 超时则强制收尾遗留卡片      —— 不能留下永远转圈的卡
+      5. presence 记停机起点       —— 开机时能算出真实中断时长
+      6. shutdown /s /t 0 /f       —— 立刻断电
+
+    为什么不在收到请求的那一刻就断电：那会把**正在渲染的那张卡**砍成僵尸卡
+    （跟协同重启踩过的坑一模一样）。
+    """
+
+    def _loop():
+        drain_deadline = 0.0
+        announced = False
+        while True:
+            time.sleep(2.0)
+            req = bot_shutdown.shutdown_request()
+            if not req:
+                # 标记没了 = 用户撤销了：恢复收活
+                if handler.draining and handler.draining_reason == "shutdown":
+                    handler.draining = False
+                    handler.draining_reason = ""
+                    announced = False
+                    log.info("关机请求已撤销：恢复接收新任务")
+                continue
+            if bot_shutdown.is_stale(req):
+                # 上次开机留下的陈旧标记：清掉，别当成"还要关机"
+                bot_shutdown.clear_shutdown()
+                log.info("关机标记已陈旧（来自上一次开机），已清除")
+                continue
+            if not handler.draining:
+                handler.draining = True
+                handler.draining_reason = "shutdown"
+                drain_deadline = time.time() + bot_shutdown.DEFAULT_GRACE
+                log.info("收到关机请求（%s）：拒收新任务，等 %d 个回合跑完",
+                         req.get("reason") or "-", TURN_GATE.busy_count)
+            if not announced:
+                announced = True
+                try:
+                    bot_presence.push_shutdown_notice(
+                        req.get("reason") or "",
+                        delay=req.get("delay") or bot_shutdown.DEFAULT_DELAY,
+                        mode=req.get("mode") or "force")
+                except Exception as e:  # noqa: BLE001
+                    log.warning("推送关机预告失败（不影响关机）：%s", e)
+            if TURN_GATE.busy_count > 0 and time.time() < drain_deadline:
+                continue
+            busy = TURN_GATE.busy_count
+            if busy > 0:
+                log.warning("关机排空超时（仍有 %d 个回合），强制收尾", busy)
+            perform_shutdown(handler, client, log, req,
+                             finalize_cards=(busy > 0))
+            time.sleep(3.0)
+            os._exit(0)
+
+    threading.Thread(target=_loop, daemon=True, name="shutdown-watcher").start()
+    log.info("已就绪：/shutdown 或 tools/bot_shutdown.py 可触发协同关机")
+
+
 def main():
     log = setup_logger()
     _disable_dead_proxy()
@@ -875,6 +1025,15 @@ def main():
         log.warning("启动找回失败（不影响启动）：%s", e)
 
     start_restart_watcher(handler, log)
+    start_shutdown_watcher(handler, client, log)
+
+    # 陈旧关机标记（上次开机留下的）必须清掉：
+    # 它会让看门狗以为"还有一次关机待执行"，于是开机后 bot 永远起不来。
+    try:
+        if bot_shutdown.clear_if_stale():
+            log.info("已清除陈旧的关机标记（来自上一次开机）")
+    except Exception as e:  # noqa: BLE001
+        log.warning("清除陈旧关机标记失败：%s", e)
 
 
     log.info("🤖 v3 启动（纯桥接）work_dir=%s", OPENCODE_WORK_DIR)

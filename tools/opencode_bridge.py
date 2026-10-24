@@ -398,14 +398,36 @@ def finalize_orphan_card_v2(card_id, body, footer="", failed=False) -> bool:
         return False
 
 
-def recover_inflight(client, log=None) -> int:
+def recover_inflight(client, log=None, only_pid: int | None = None,
+                     exclude_pid: int | None = None) -> int:
     """重启后找回：把上一进程没发完的卡片收尾（尽量补上真实回答）。
 
     v2 / v1 两种卡片要用各自的接口收尾（见 finalize_orphan_card_v2）。
     返回收尾成功的卡片数。best-effort，任何一步失败都不抛。
+
+    **pid 过滤（2026-10-24 补）**：在飞登记表是**磁盘上的共享文件**，
+    任何进程都能读到它 —— 包括一个刚跑起来的自测脚本。于是出过这样一件事：
+    自测脚本调 recover_inflight()，把**线上正在渲染的那张卡**收尾掉了
+    （用户看到的是「重启前这一轮没有留下回答」）。
+    所以这里默认**跳过本进程**的条目：自己的在飞回合还在渲染中，
+    谁都不许替它收尾。要收尾自己的（关机时强制切断卡住的回合），
+    显式传 only_pid。
     """
     log = log or logger
     entries = INFLIGHT.snapshot()
+    if only_pid is None:
+        # 默认：跳过本进程的条目（收尾只针对"别的/死掉的"进程留下的）
+        exclude_pid = os.getpid() if exclude_pid is None else exclude_pid
+    picked = []
+    for e in entries:
+        pid = int(e.get("pid") or 0)
+        if only_pid is not None:
+            if pid != int(only_pid):
+                continue
+        elif pid == int(exclude_pid or 0):
+            continue
+        picked.append(e)
+    entries = picked
     if not entries:
         return 0
     oc = OpenCodeService()

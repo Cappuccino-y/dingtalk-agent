@@ -64,7 +64,8 @@
 | `tools/market_data.py` | 行情抓取（新浪实时 / 国际指数） |
 | `tools/market_chart.py` | 指数点位图（中证1000 支撑/压力 + 均线，早报附图用） |
 | `tools/bot_restart.py` | 写重启标记（协同重启），绝不 kill 自己 |
-| `tools/bot_presence.py` | 停机三时点告知：重启前 / 掉线 / 已恢复 |
+| `tools/bot_presence.py` | 停机三时点告知：重启前 / 掉线 / 已恢复（+ 关机预告） |
+| `tools/bot_shutdown.py` | 写关机标记 + Windows 兜底倒计时 + 撤销（协同关机） |
 | `tools/dingtalk_push.py` | 主动推文本/图片/文件（agent 与作业都用它） |
 | `tools/notifycation.py` | 钉钉 webhook、企业 access_token、图片上传 |
 | `tools/llm_client.py` | 火山 Ark 的小模型调用（`report_news_data` 用） |
@@ -82,6 +83,7 @@
 - `sessions.json`：钉钉会话 → OpenCode session id
 - `inflight.json`：在飞回合（含卡片 id），重启后收尾用
 - `restart.request`：重启标记
+- `shutdown.request`：关机标记（`requested_at` / `delay` / `mode` / `reason`）
 - `last_prompt.json`：最近一次提问，卡片「重试」按钮重放用
 - `card_archive.json`：卡片档案（全局 200 条 / 每会话 30 条，文本相似度匹配 ≥0.60）
 - `presence.json`：最后存活时间 + 停机标记
@@ -164,7 +166,7 @@
 ## 五、可靠性与"别让用户以为它死了"
 
 钉钉 Stream 的特性：机器人离线期间的消息**不会补发**，用户看到的就是一片安静。
-所以做了四层：
+所以做了五层：
 
 1. **协同重启**：`/restart` 或 `tools/bot_restart.py` 只写 `restart.request`，
    监听进程停止接新任务（`draining`），**当前这一轮跑完、卡片收尾之后**才退出，
@@ -173,9 +175,25 @@
    "正在思考…[AILoading]"，用户以为卡死。
 2. **重启找回**：在飞回合登记在 `inflight.json`；新进程启动时 `recover_inflight`
    给遗留卡片收尾（补真实回答，或标注"重启前未完成"）。强杀/断电也兜得住。
+   ⚠ `recover_inflight` **默认跳过本进程**的条目（自己的在飞回合还在渲染，
+   谁都不许替它收尾；要收尾自己的用 `only_pid=os.getpid()`）。
+   登记表是磁盘上的共享文件，别的进程读得到 —— 没有 pid 过滤就会出现
+   "自测脚本把线上正在渲染的卡收尾了"这种事故。
 3. **停机告知**：`bot_presence` 三处 —— 重启前推"正在重启"、意外掉线由看门狗推
    "掉线了"、新进程起来推"已恢复（中断 N 秒，没回音的重发）"。
-4. **单实例 + 限速 + 闸门**：命名互斥体防双连接；每人 20 条/分；全局 3 并发。
+   口径分两种：**计划内停机**（重启/关机，用户自己安排的）vs **意外掉线**
+   （崩了）——用户不用每次都猜是不是炸了。
+4. **协同关机**：`/shutdown` 或 `tools/bot_shutdown.py` 写 `shutdown.request`
+   并起 Windows 兜底倒计时（`shutdown /s /t N`）；监听进程排空在飞回合 →
+   推"电脑即将关机" → `shutdown /s /t 0 /f` 断电。
+   - 顺序照优雅终止的通行做法：**先停止收新活 → 再告别 → 有界等待 → 最后强断**；
+   - Windows 的 `/t > 0` **隐含 `/f`**（定时关机一定会强杀应用），
+     所以"不丢未保存内容"只能靠 `/t 0` 不带 `/f`（但会弹窗等人确认）；
+   - 关机窗口内可撤销：`/取消关机` = 删标记 + `shutdown /a`；
+   - 标记是磁盘文件、**跨重启存活** → 陈旧标记（早于本次开机）必须当不存在，
+     否则看门狗会以为"还有一次关机待执行"，开机后 bot 永远起不来。
+     机器人启动时 `bot_shutdown.clear_if_stale()` 清；看门狗脚本也按开机时间判。
+5. **单实例 + 限速 + 闸门**：命名互斥体防双连接；每人 20 条/分；全局 3 并发。
 
 ---
 
@@ -299,6 +317,7 @@
 | 2026-10-24 | **evolve 不再提「已经改过的事」**（用户反馈：11:56 那轮提的 3 条全是之前已经确定修改过的）：根因是提案器只有「记忆索引」一个对照源 —— ① 很多改动是在对话里当场改的（IC Monitor 三条防误判规则），**没进记忆索引**，于是每次扫描都当成新问题；② `rejected_summaries()` 只把「被驳回」的喂给模型，**「暂缓」和「已落地」的主题照样被重提**；③ 提示词没告诉模型「问答存档里的 A（回答）= 当时的处理结果」。做法：① 新增 `memory_store.handled_summaries()`（驳回 / 暂缓 / 已落地 三种状态全给）；② 新增「近期已完成改动」清单（journal 里带完成标记的条目 + 当时的回答摘要）当对照表；③ 提示词加硬规则「只提还没做的事」+「回答里说已改/已撤回/已实现的不要再提」。验证：改完再跑一轮 `--dry-run`，3 条老问题变成 1 条真新问题 | `tools/evolve.py`、`tools/memory_store.py` |
 
 | 2026-10-24 | **evolve 收窄管辖范围 + 提前到 08:00**（用户两条意见：①「evolve 应该专注于 bot 自身的架构或机制优化，有必要关注具体工作吗」；②「八点多开机跑的 evolve 为什么超时未完成，我这边都没看到给我进行审批，后面补跑才审批」）。① **管辖范围**：evolve 只提 **dingtalk-agent 自身架构/机制**（交互链路、卡片/审批、调度与作业可靠性、记忆与提案机制、推送去重、超时/静默/截断、看门狗自愈、开机重启）；具体业务工作（IC 抄底摸顶规则、QVIX/融资阈值、回测口径、行情点位）和别的项目的活一律不提。做法 = 提示词加范围约束 + **确定性范围闸门**（`tools/evolve.py::in_scope`：命中业务域词表 → 丢；一个 bot 机制标志词都没有 → 丢；丢弃的记 journal `evolve_skip`，可审计）。10-24 11:56 那轮的 3 条提案（IC 融资分级 / IC QVIX 缺日 / 作业超时截断）现在会被闸门挡掉 2 条，游戏补丁那条（GP/JP vs SP 消耗）也挡掉。② **时间 09:20 → 08:00**：原来 08:40 开机后 evolve 要**白等 40 分钟**才到点，而 10-24 早上 09:00 机器被关机 → 09:20 那轮压根没启动，审批卡直到 11:54 补跑才出现（用户等了近 3 小时）。改成 08:00 + 12 小时窗口 = 开机即补跑，卡片 ~08:43 到手机；`occurrence_for` 优先取「今天」的 occurrence，不会重复跑 | `tools/evolve.py`、`scheduler/registry.py` |
+| 2026-10-24 | **协同关机机制**（用户「关机」→ 又「停掉」→ 「完善关机等离线机制」）：新增 `tools/bot_shutdown.py`（写 `shutdown.request` + `shutdown /s /t N` 兜底 + `shutdown /a` 撤销 + journal 审计 + `--dry-run`）、`bot/listen.py` 的 `start_shutdown_watcher`（排空 → 推「电脑即将关机」→ `shutdown /s /t 0 /f` 断电）、`/shutdown` `/关机` `/取消关机` 指令、`bot_presence.push_shutdown_notice` + 停机口径改成**计划内停机 vs 意外掉线**。参考 IRC quit message（`Quit: <原因>` = 计划内 / `Client Quit` = 没告别 / `Connection reset` = 崩了）与 K8s 优雅终止（先摘流量 → preStop → SIGTERM → 有界等待 → SIGKILL）：**先停止收新活 → 再告别 → 有界等待 → 最后强断**，告别必须**先于**断电送达。⚠ 关键修正：Windows `shutdown /t > 0` **隐含 `/f`**（定时关机一定强杀应用，"不丢未保存内容"只能 `/t 0` 不带 `/f`，但会弹窗等人确认）。⚠ 第二个关键修正：**关机标记跨重启存活** → 陈旧标记（早于本次开机）必须当不存在，否则看门狗以为"还有一次关机待执行"，开机后 bot 永远起不来；机器人启动时 `clear_if_stale()` 清，看门狗脚本按 `LastBootUpTime` 判并删除。⚠ 第三个：**看门狗在计划内关机时必须 stand down**（否则把 bot 当掉线拉起来 + 误推"掉线了"）→ 看门狗脚本加 `Test-ShutdownPending`。⚠ 顺带修掉一个自测暴露的事故：`recover_inflight` 读的是**磁盘共享**的 `inflight.json`，自测脚本调它把**线上正在渲染的卡**收尾了 → 现在默认跳过本进程条目（`only_pid` 显式指定才动自己的） | `tools/bot_shutdown.py`、`tools/bot_presence.py`、`tools/opencode_bridge.py`、`bot/listen.py`、`C:\Users\yydyy77\bin\dingtalk-bot-autostart.ps1` |
 
 ---
 
@@ -359,6 +378,7 @@
 | 改早报内容/时机 | `jobs/premarket_push.py`（时机在 `registry.py` 的 `at` / `window_min`） |
 | 改 IC 信号阈值/图表 | `jobs/ic_signal_monitor.py`、`jobs/ic_weekly_report.py` |
 | 改重启/恢复行为 | `tools/bot_restart.py`、`InflightRegistry`、`recover_inflight` |
+| 改关机/离线行为 | `tools/bot_shutdown.py`（标记+倒计时）、`bot/listen.py` 的 `start_shutdown_watcher`、看门狗脚本的 `Test-ShutdownPending` |
 | 换模型/改候选 | `.env` 与桥接层 `DEFAULT_MODEL` / `FALLBACK_MODEL` / `MODEL_CHOICES` |
 
 常用核查：
@@ -367,6 +387,7 @@
 python -m compileall -q bot tools datalayer jobs scheduler
 python tools\bot_presence.py --status       # 在线状态
 python tools\bot_restart.py --status        # 有没有挂起的重启
+python tools\bot_shutdown.py --status       # 有没有待关机
 python -m scheduler status                  # 作业今天跑没跑
 Get-Content bot\logs\dingtalk_v3.log -Tail 50
 Get-Content ~\.dingtalk-bot\autostart.log -Tail 30

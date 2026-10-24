@@ -659,3 +659,56 @@ IC 监控**已经加进去了**，现在是调度器里的第二个作业：
 - session: ses_e995e5056ffeXgtH0GyVqrZFfh
 - detail: 用户中断了这一轮
 
+## 2026-10-24T11:56:52 — evolve
+- Summary: 扫描完成，提出 3 条提案，等待用户审批
+- proposals: prop_20261024-115650_f23d,prop_20261024-115650_231d,prop_20261024-115650_1150
+
+## 2026-10-24T11:58:33 — proposal_rejected
+- Summary: 提案被驳回: IC Monitor 的融资 -3% 只能用于强弱分级，不能作为硬剔除条件
+- proposal: prop_20261024-115650_f23d
+- note: 用户在钉钉审批卡上驳回
+
+## 2026-10-24T11:58:33 — proposal_rejected
+- Summary: 提案被驳回: IC Monitor 遇到 QVIX 缺日或长假前夜数据时应延后判定
+- proposal: prop_20261024-115650_231d
+- note: 用户在钉钉审批卡上驳回
+
+## 2026-10-24T11:58:33 — proposal_deferred
+- Summary: 提案暂缓: 作业超时后必须标记为截断，不能将部分正文视为完成
+- proposal: prop_20261024-115650_1150
+
+## 2026-10-24T12:13:37 — proposal_rejected
+- Summary: 提案被驳回: 作业超时后必须标记为截断，不能将部分正文视为完成
+- proposal: prop_20261024-115650_1150
+- note: 已实现（2026-10-22 起）：tools/opencode_bridge.py 已有 timed_out 标记 + 卡片状态「⏱ 已截断」+「继续刚才的」入口，WAIT_TIMEOUT=1800。用户 2026-10-24 反馈这是已确定改过的事，不再重复提
+
+## 2026-10-24T12:26:30 — evolve
+- Summary: 本次扫描没有值得提的提案
+- journal_entries: 65
+
+## 2026-10-24T13:19:41 — proposal_approved
+- Summary: 提案已落地: 【测试】审批卡链路自检
+- proposal: prop_20261024-131912_1782
+- memory_id: mem_86a8e568_19181
+- scope: project:dingtalk-agent
+- supersedes: -
+- evidence_refs: -
+
+## 2026-10-24T13:57:13 — stop
+- Summary: 用户反馈：stop
+- conv: cidwKuyECv5z+YK5cPBDeiA3wT/FKag4TRfj0dqHzRfrDk=
+- session: ses_e93a7c677ffe7OjL1eg2oydhki
+- detail: 用户中断了这一轮
+
+## 2026-10-24T17:02:34 — stop
+- Summary: 用户反馈：stop
+- conv: cidwKuyECv5z+YK5cPBDeiA3wT/FKag4TRfj0dqHzRfrDk=
+- session: ses_e93a7c677ffe7OjL1eg2oydhki
+- detail: 用户中断了这一轮
+
+## 2026-10-24T17:02:39 — stop
+- Summary: 用户反馈：stop
+- conv: cidwKuyECv5z+YK5cPBDeiA3wT/FKag4TRfj0dqHzRfrDk=
+- session: ses_e93a7c677ffe7OjL1eg2oydhki
+- detail: 用户中断了这一轮
+
