@@ -168,3 +168,20 @@ source.agentIds: evolve, user-approved
 动作: 将面向下游的信号输出固定为纯 ASCII，并在模块入口把 stdout/stderr 统一设为 UTF-8 且 errors="replace"；修复后使用 --once 验证退出码为 0，并依据实际推送结果记录成功，避免重试造成重复通知。
 适用范围: dingtalk-agent 的 ic_monitor 信号输出、推送状态判定和调度执行链路。
 
+---
+memoryId: mem_86a8e568_19181
+timestamp: 2026-10-24T05:19:41Z
+scope: project:dingtalk-agent
+category: gotcha
+title: 【测试】审批卡链路自检
+tags: [evolve]
+confidence: low
+trust: self
+source.messageIds: proposal:prop_20261024-131912_1782
+source.agentIds: evolve, user-approved
+---
+
+这是一条**纯测试**提案，用来验证钉钉审批卡的完整链路。
+动作: 在手机上选「批准 / 驳回 / 稍后再说」，看卡片是否正确收尾、桥接是否正确解析你的选择。
+适用范围: 仅测试用，落地后可直接废弃这条记忆条目。
+

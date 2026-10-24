@@ -1,0 +1,20 @@
+{
+  "type": "memory",
+  "title": "【测试】审批卡链路自检",
+  "scope": "project:dingtalk-agent",
+  "category": "gotcha",
+  "confidence": "low",
+  "body": "这是一条**纯测试**提案，用来验证钉钉审批卡的完整链路。\n动作: 在手机上选「批准 / 驳回 / 稍后再说」，看卡片是否正确收尾、桥接是否正确解析你的选择。\n适用范围: 仅测试用，落地后可直接废弃这条记忆条目。",
+  "evidence": "测试用：用户要求发一个审批卡试一下",
+  "supersedes": "",
+  "risk": "测试用途；若选批准会写入一条测试记忆，随时可废弃。",
+  "expected_gain": "确认审批卡推送、回调解析、落地/驳回、卡片收尾四段链路都通。",
+  "source": "manual-test",
+  "proposed_by": "opencode-manual",
+  "id": "prop_20261024-131912_1782",
+  "created_at": "2026-10-24T05:19:12Z",
+  "status": "approved",
+  "card_pushed_ts": 1792819171.4887745,
+  "card_pushed_at": "2026-10-24T05:19:31Z",
+  "decided_at": "2026-10-24T05:19:41Z"
+}
