@@ -65,6 +65,8 @@ JOBS: list[Job] = [
     ),
     # IC 信号监控：**归本 bot**（2026-10-23 从 MainToy 那条链收回）。
     # 08:50 主判：触发就推信号，没触发就推每日心跳日报。
+    # 2026-10-24：**周末也跑**（用户要求）—— 周末 akshare 最新数据 = 周五收盘，
+    # 周末这一轮是第一次判到周五收盘数据，推「非交易日回顾」；脚本内部按数据日去重。
     # 去重靠脚本自己的历史文件（var/ic/ic_signal_history.json），
     # 所以 09:20 补判、手动 /ic 都不会把同一条信号推两遍。
     Job(
@@ -73,6 +75,7 @@ JOBS: list[Job] = [
         argv=[PYTHON, IC_SCRIPT, "--once"],
         at=(8, 50),
         window_min=70,           # 8:50~10:00，和脚本原本的早盘窗口一致
+        dow=None,                # 每天都跑（周末跑非交易日回顾）
         timeout_s=600,
         max_attempts=3,
         retry_delay_s=180,

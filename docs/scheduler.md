@@ -43,7 +43,8 @@
                                     失败 → notify.py（按 key 去重，只发一次）
 
 > **IC 监控（抄底/顶部信号 + 周报）归本调度器管**（2026-10-23 从 MainToy 那条链收回）：
-> 定时作业 = `ic_monitor`（周一~周五 08:50）/ `ic_recheck`（09:20）/ `ic_weekly`（周一 09:05），
+> 定时作业 = `ic_monitor`（**每天** 08:50，周末跑「非交易日回顾」）/ `ic_recheck`（周一~周五 09:20）/
+> `ic_weekly`（周一 09:05），
 > 脚本 = 本仓库 `jobs/ic_signal_monitor.py` / `jobs/ic_weekly_report.py`，
 > 状态/历史 = `var/ic/`（已并入 MainToy 侧历史，10-22 那条抄底不重推），
 > 推送 = **本机器人 1:1**（`tools/dingtalk_push`）→ 钉钉署名是本机器人，不是「py 小助手」群机器人。
@@ -95,14 +96,15 @@ scheduler/
 |---|---|---|
 | `premarket` | `jobs/premarket_push.py` | 依赖也都在本仓库：`tools/opencode_bridge.py`、`tools/dingtalk_push.py`、`tools/market_chart.py` |
 | `evolve` | `tools/evolve.py` | 同上 |
-| `ic_monitor` | `MainToy\finanCalc\ic_signal_monitor.py` | **仅手动**；IC 归 MainToy 那条链（`IC_HOME` 可改） |
-| `ic_weekly` | `MainToy\finanCalc\ic_weekly_report.py` | 同上 |
+| `ic_monitor` | `jobs/ic_signal_monitor.py` | **本仓库权威副本**（2026-10-23 收回）；每天 08:50，**周末也跑** |
+| `ic_recheck` | `jobs/ic_signal_monitor.py --once --triggers-only` | 同上；周一~周五 09:20 补判 |
+| `ic_weekly` | `jobs/ic_weekly_report.py` | 同上；周一 09:05 |
 
-> 2026-10-22：IC 监控/周报交回 MainToy 那条链（启动归 `autorun\autoworkflow.py`，
-> 推送归 MainToy 侧 notify = py 小助手群 webhook）。本仓库只留手动入口，
-> 指向**同一份脚本 + 同一份状态/历史**（`IC_HOME`）→ 两边共用去重，不会双推。
-> `jobs/ic_signal_monitor.py`、`jobs/ic_weekly_report.py` 两份副本**已停用**：
-> 它们写的是 `var/` 下另一套状态文件，单独跑会跟那条链各推一遍。
+> 2026-10-23：IC 监控/周报**收回本 bot**（启动、状态、去重、推送全在本仓库），
+> MainToy 那条链的 Popen 已删 → 两边不会双推。
+> 2026-10-24：IC 监控**周末也跑**（用户要求）——周末 akshare 最新数据 = 周五收盘，
+> 周末这一轮是第一次判到周五收盘数据，推「非交易日回顾」；
+> 同一份数据没更新（周日再跑）就跳过，不刷屏。信号按**数据日**去重，不会重推。
 
 运行期产物统一放 `var/`（`.gitignore` 已忽略）：
 

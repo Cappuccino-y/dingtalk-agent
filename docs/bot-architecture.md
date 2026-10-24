@@ -216,16 +216,16 @@
 |---|---|---|
 | `premarket` 盘前早报 | 每天 08:00（补跑 180 分钟） | `jobs/premarket_push.py` |
 | `evolve` 知识与行为改进扫描 | 每天 09:20（补跑 720 分钟） | `tools/evolve.py` |
-| `ic_monitor` IC 信号监控 | 周一~周五 08:50（补跑 70 分钟） | `jobs/ic_signal_monitor.py` |
+| `ic_monitor` IC 信号监控 | 每天 08:50（补跑 70 分钟，周末跑非交易日回顾） | `jobs/ic_signal_monitor.py` |
 | `ic_recheck` IC 信号补判 | 周一~周五 09:20（补跑 40 分钟） | `jobs/ic_signal_monitor.py --once --triggers-only` |
 | `ic_weekly` IC 周报 | 周一 09:05（补跑 100 分钟） | `jobs/ic_weekly_report.py` |
 
 **IC 监控（抄底/顶部信号 + 周报）2026-10-23 起收回本仓库**（用户明确：
 「我当时的决定是错误的，改回来，这个 icmonitor 完全由你控制」）：
 
-- **定时由本仓库调度器负责**：`ic_monitor`（08:50 主判：触发推信号，没触发推每日心跳日报）、
-  `ic_recheck`（09:20 补判，只补真信号不发心跳——补 08:50 因数据滞后被拒判的情况）、
-  `ic_weekly`（周一 09:05 出图）。
+- **定时由本仓库调度器负责**：`ic_monitor`（08:50 主判：触发推信号，没触发推每日心跳日报；
+  **周末也跑**，推「非交易日回顾」）、`ic_recheck`（周一~周五 09:20 补判，只补真信号不发心跳——
+  补 08:50 因数据滞后被拒判的情况）、`ic_weekly`（周一 09:05 出图）。
 - **推送走本机器人 1:1 通道**（`tools/dingtalk_push.push_markdown` / `push_image`）→
   钉钉里署名是**本机器人**，不再是「py 小助手」群机器人。
   想额外推「交易讯息更新」群：设环境变量 `IC_PUSH_GROUP=1`（默认只推 1:1）。
@@ -294,6 +294,9 @@
 | 2026-10-23 | **IC 监控收回本 bot**（用户明确：「我当时的决定是错误的，改回来，这个 icmonitor 完全由你控制」）：① `scheduler/registry.py` 的 `ic_monitor` 改回 `scheduled=True`（周一~周五 08:50，脚本 = 本仓库 `jobs/ic_signal_monitor.py --once`，失败告警回本机器人 1:1），新增 `ic_recheck`（09:20，`--once --triggers-only`，补 08:50 因数据滞后被拒判的情况），`ic_weekly` 改回周一 09:05；② 推送改回**本机器人 1:1**（`tools/dingtalk_push.push_markdown` / `push_image`）→ 钉钉署名是本机器人，不再是「py 小助手」群机器人，群推变成开关 `IC_PUSH_GROUP=1`；③ 状态/历史统一到本仓库 `var/ic/`，并把 MainToy 侧历史**并进来**（含 2026-10-22 那条抄底）→ 不重推，MainToy 侧旧状态文件改名归档 `*.retired-20261023.json`；④ `MainToy\autorun\autoworkflow.py` 删除拉起 IC 脚本的 Popen（留停用说明），`MainToy\finanCalc\ic_signal_monitor.py` 顶部加「已停用」头 → 两边不会双推；⑤ 调度器进程已重启加载新作业表 | `scheduler/registry.py`、`scheduler/config.py`、`jobs/ic_signal_monitor.py`、`jobs/ic_weekly_report.py`、`MainToy\autorun\autoworkflow.py`、`MainToy\finanCalc\ic_signal_monitor.py` |
 
 | 2026-10-23 | **IC 抄底信号加三条防误判规则**（起因：2026-09-24 那次误判 —— 触发日是中秋前最后一个交易日，指数 -2.15% 是节前流动性枯竭的抛售、QVIX 几乎没定价（23.30→23.98），而「5日动量 -7.38%」测的是 6 天前一轮**反弹期**的恐慌溢价消退；随后 20 日再跌 11.2%）：① **QVIX 窗口缺日 → 不判定**（`pct_change(5)` 是位置位移，序列缺行时「5 天前」会落到不相干的一天；09-11、10-12 那两次触发今天已不可复现）；② **长假前夜 → 顺延到节后第一个交易日重判**（查 akshare 交易日历，判据「下一个交易日 - 数据日 ≥ 4 自然日」；09-24 顺延后 09-28~10-12 连续 6 日都不成立 → 那次假信号消失）；③ **融资强度分级**（≤-3% 强 / >-3% 弱，**不设硬门槛** —— 实测硬门槛会剔掉 9 簇里 6 簇、其中 5 簇是 20/60 日都涨的有效样本）。消息文案同步：去掉「历史 100% 60日胜率」和具体买卖指令，改为真实口径 + 强弱标注 + 兑现窗口提示。新增 `jobs/ic_backtest.py`（新旧口径对比 + **统一持有期口径**：信号后首个可交易日开盘入场）与 `tests/test_ic_signal.py`（15 项，全合成数据）。回测结果：新口径**只剔掉 2026-09-24**，无新增，20日 7/7、60日 6/6 不变、5日 4/8→4/7 | `jobs/ic_signal_monitor.py`、`jobs/ic_backtest.py`、`jobs/ic_weekly_report.py`、`tests/test_ic_signal.py` |
+
+| 2026-10-24 | **IC 监控周末也跑**（用户要求）：`ic_monitor` 的 `dow` 从「周一~周五」改成**每天**；脚本 `--once` 不再在周末直接 `skipped="weekend"`，改成走「非交易日回顾」分支 —— 周末 akshare 最新数据 = **周五收盘**（周五 18:00 后才更新），所以周末这一轮是**第一次**判到周五收盘数据；新增状态字段 `last_push_data_date` 记录「上次推过的数据日」——同一份数据再跑（周日）就跳过不刷屏；推送标题区分「IC 信号心跳播报 / IC 非交易日回顾」。信号按**数据日**去重（`ic_signal_history.json`），周五推过的周末不会重推。`ic_recheck` 仍限周一~周五（周末补判无意义）。**顺手修掉一个老隐患**：`check_top_signal` 的 `drop_ok/margin_ok/qvix_rise_ok` 是 numpy.bool_，`write_status()` 的 `json.dumps` 会抛 `TypeError: Object of type bool is not JSON serializable` —— 只要指数处于 60 日新高，**每日心跳/回顾就必崩**（信号路径 `write_alert` 同理），现在统一转 Python bool | `scheduler/registry.py`、`jobs/ic_signal_monitor.py`、`tests/test_ic_signal.py` |
+| 2026-10-24 | **evolve 不再提「已经改过的事」**（用户反馈：11:56 那轮提的 3 条全是之前已经确定修改过的）：根因是提案器只有「记忆索引」一个对照源 —— ① 很多改动是在对话里当场改的（IC Monitor 三条防误判规则），**没进记忆索引**，于是每次扫描都当成新问题；② `rejected_summaries()` 只把「被驳回」的喂给模型，**「暂缓」和「已落地」的主题照样被重提**；③ 提示词没告诉模型「问答存档里的 A（回答）= 当时的处理结果」。做法：① 新增 `memory_store.handled_summaries()`（驳回 / 暂缓 / 已落地 三种状态全给）；② 新增「近期已完成改动」清单（journal 里带完成标记的条目 + 当时的回答摘要）当对照表；③ 提示词加硬规则「只提还没做的事」+「回答里说已改/已撤回/已实现的不要再提」。验证：改完再跑一轮 `--dry-run`，3 条老问题变成 1 条真新问题 | `tools/evolve.py`、`tools/memory_store.py` |
 
 ---
 

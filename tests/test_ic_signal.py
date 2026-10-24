@@ -13,6 +13,7 @@ import os
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
@@ -238,6 +239,75 @@ class TestRunOnceBehaviour(unittest.TestCase):
             icm.run_once(dry_run=False)
         self.assertEqual(len(self.sent), 1)
         self.assertIn("已顺延", self.sent[0][0])
+
+
+class _FrozenDatetime(datetime):
+    """把模块里的 datetime.now() 钉死，用来模拟周末。"""
+
+    frozen = datetime(2026, 10, 25, 8, 50)      # 周日
+
+    @classmethod
+    def now(cls, tz=None):
+        return cls.frozen
+
+
+class TestWeekendBehaviour(unittest.TestCase):
+    """2026-10-24：IC 监控周末也跑（判最新交易日数据 + 推「非交易日回顾」）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.state_path = Path(self.tmp.name) / "state.json"
+        self.sent: list = []
+        patches = [
+            mock.patch.object(icm, "STATE_PATH", self.state_path),
+            mock.patch.object(icm, "SIGNAL_HISTORY", Path(self.tmp.name) / "history.json"),
+            mock.patch.object(icm, "LATEST_SIGNAL", Path(self.tmp.name) / "latest.json"),
+            mock.patch.object(icm, "push_bot_message",
+                              side_effect=lambda text, title="t": self.sent.append((text, title)) or True),
+            mock.patch.object(icm, "_trade_calendar", return_value=set()),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        icm._TRADE_CAL = None
+        icm._TRADE_CAL_TS = 0.0
+        icm._PRE_HOLIDAY = None
+        icm._PRE_HOLIDAY_TS = 0.0
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _df_flat(self):
+        """一段**不触发**任何信号的数据（涨势 + QVIX 走高 + 融资走高）。"""
+        dates = pd.bdate_range(start="2026-06-01", end="2026-10-23").tolist()
+        n = len(dates)
+        return make_df(dates,
+                       spot=np.linspace(5000, 6000, n),
+                       qvix=np.linspace(20, 30, n),
+                       margin=np.linspace(12000, 13000, n))
+
+    def test_weekend_runs_and_pushes_review(self):
+        """周末不再 skipped=weekend，而是照常判定 + 推「非交易日回顾」。"""
+        df = self._df_flat()
+        with mock.patch.object(icm, "datetime", _FrozenDatetime):
+            with mock.patch.object(icm, "load_latest_data", return_value=df):
+                res = icm.run_once(dry_run=False)
+        self.assertNotEqual(res.get("skipped"), "weekend")
+        self.assertEqual(res["sent"], ["heartbeat"])
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("非交易日回顾", self.sent[0][0])
+        self.assertEqual(self.sent[0][1], "IC 非交易日回顾")
+
+    def test_weekend_same_data_does_not_spam(self):
+        """同一份数据（周日再跑）→ 跳过，不重复推回顾。"""
+        df = self._df_flat()
+        with mock.patch.object(icm, "datetime", _FrozenDatetime):
+            with mock.patch.object(icm, "load_latest_data", return_value=df):
+                res1 = icm.run_once(dry_run=False)
+                res2 = icm.run_once(dry_run=False)
+        self.assertEqual(res1["sent"], ["heartbeat"])
+        self.assertEqual(res2.get("skipped"), "no-new-data")
+        self.assertEqual(len(self.sent), 1)
 
 
 if __name__ == "__main__":

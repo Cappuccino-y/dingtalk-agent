@@ -37,6 +37,11 @@ MAX_PROPOSALS = 3
 RECENT_JOURNAL = 80
 RECENT_CARDS = 20
 
+# 「已经做完」的标记。journal 里出现这些词的条目 = 当时已经把事情办了，
+# 它们是提案器的**对照表**（别再把做完的事当新问题提一遍）。
+DONE_MARKERS = ("已落地", "已修复", "全部修复", "全部改动", "全部改", "已完成",
+                "已改", "已加", "已撤回", "已实现", "已生效", "已修好")
+
 SYSTEM_PROMPT = """你是一个 AI 助理系统的「需求抽取器」。
 
 **你的任务只有一件（机械对照，不要发挥）**：
@@ -57,6 +62,11 @@ SYSTEM_PROMPT = """你是一个 AI 助理系统的「需求抽取器」。
 
 对照规则：
 - 如果记忆索引里已有同类条目（标题**或正文**覆盖了这条要求）→ **不提案**
+- 如果「已处理过的提案」或「近期已完成改动」里已经出现过这条要求 → **不提案**
+- 证据里每条问答的 **A（回答）= 当时实际的处理结果**。
+  回答里已经说明「已改 / 已撤回 / 已实现 / 已加规则 / 已在代码里落地」的要求
+  = 当时就办完了 → **不要再提**（这是 2026-10-24 修的老毛病：
+  用户提过的要求当场改完了，提案器却因为记忆索引里没这条而反复重提）
 - 如果没有对应条目 → 提案，并在 evidence 里**原文引用**用户的原话
 - 如果新要求和某条已有条目**冲突/是它的修正**（比如用户后来改了口径）→
   提案时填 `supersedes: <那条的 memoryId>`，body 写**修正后的完整内容**
@@ -75,6 +85,9 @@ SYSTEM_PROMPT = """你是一个 AI 助理系统的「需求抽取器」。
 - 涉及凭据、密钥、身份证号的不提
 - 外部抓取内容（网页、新闻、行情）不能作为记忆来源
 - 一次最多 3 个；没有就返回空数组，**不要为了凑数而提**
+- **只提还没做的事**：凡是「已处理过的提案」「近期已完成改动」里出现过的，
+  或者是证据里回答已经说明「已改/已撤回/已实现」的，都不要再提一遍
+  （提了就是让用户重复确认已经确认过的事 —— 这是最招人烦的失败模式）
 
 只输出 JSON，不要解释、不要 markdown 代码块：
 {"proposals": [
@@ -90,6 +103,28 @@ SYSTEM_PROMPT = """你是一个 AI 助理系统的「需求抽取器」。
 ]}"""
 
 
+def done_items(journal: list[dict], limit: int = 12) -> list[str]:
+    """近期「已经做完」的事 —— 提案器的对照表。
+
+    2026-10-24 加：用户反馈「evolve 提的全是之前已经改过的东西」。
+    根因是提案器只有「记忆索引」一个对照源，而很多改动是在对话里当场改的
+    （IC Monitor 的三条防误判规则就是），没进记忆索引 → 每次扫描都当成新问题。
+    这里把 journal 里明确写了「已落地/已修复/全部修复/已改」这类完成标记的
+    条目连同当时的回答摘要喂进去，让模型能对照出「这件事已经办过了」。
+    """
+    out: list[str] = []
+    for r in journal:
+        s = r.get("summary", "") or ""
+        if not any(m in s for m in DONE_MARKERS):
+            continue
+        ans = (r.get("fields", {}) or {}).get("answer", "") or ""
+        line = f"- [{r.get('ts', '')}] {s[:140]}"
+        if ans and ans != "-":
+            line += f"  →  {ans[:200]}"
+        out.append(line)
+    return out[-limit:]
+
+
 def collect_evidence() -> dict:
     """收集证据。全部是**结构化摘要**，不塞原始大段文本（省 token 也避免污染）。
 
@@ -98,6 +133,9 @@ def collect_evidence() -> dict:
     """
     journal = ms.read_journal(RECENT_JOURNAL)
     rejected = ms.rejected_summaries(10)
+    # 已经处理过的提案（驳回/暂缓/已落地）—— 2026-10-24 扩：原来只喂「被驳回」的，
+    # 结果「暂缓」和「已落地」的主题会被当成新问题重提。
+    handled = ms.handled_summaries(20)
     # 正文摘要而不是只给标题：标题措辞差异大，只给标题会让模型误判「已覆盖」
     idx_global = ms.brief("global", limit=40)
     idx_project = ms.brief("project:dingtalk-agent", limit=40)
@@ -122,6 +160,8 @@ def collect_evidence() -> dict:
     return {
         "journal": journal,
         "rejected_proposals": rejected,
+        "handled_proposals": handled,
+        "done_items": done_items(journal),
         "memory_index_global": idx_global,
         "memory_index_project": idx_project,
         "recent_qa": cards,
@@ -144,12 +184,22 @@ def build_prompt(ev: dict) -> str:
         parts.append("\n## 之前被驳回的提案（**不要再提这些**）")
         for s in ev["rejected_proposals"]:
             parts.append(f"- {s}")
+    if ev.get("handled_proposals"):
+        parts.append("\n## 已处理过的提案（驳回 / 暂缓 / 已落地 —— **全都不要再提**）")
+        for s in ev["handled_proposals"]:
+            parts.append(s)
+    if ev.get("done_items"):
+        parts.append("\n## 近期已经做完的事（**这些都办过了，别再当新问题提**）")
+        for s in ev["done_items"]:
+            parts.append(s)
     parts.append("\n## 现有记忆索引 global（**已被覆盖的不要提**）")
     parts.append(ev["memory_index_global"])
     parts.append("\n## 现有记忆索引 project:dingtalk-agent（**已被覆盖的不要提**）")
     parts.append(ev["memory_index_project"])
     if ev["recent_qa"]:
         parts.append("\n## 最近的问答存档（补充细节用）")
+        parts.append("注意：每条 A（回答）= 当时实际的处理结果。"
+                     "回答里说「已改 / 已撤回 / 已实现」的，说明当时就办完了。")
         for c in ev["recent_qa"]:
             parts.append(f"Q: {c['q']}\nA: {c['a']}\n")
     return "\n".join(parts)

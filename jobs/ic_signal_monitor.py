@@ -2,7 +2,10 @@
 IC 期货多信号监控（抄底 + 顶部预警/确认）—— **由本 bot 自主管理（2026-10-23 收回）**
 
 IC 监控整条链归本机器人（用户 2026-10-23 明确：「这个 icmonitor 完全由你控制」）：
-- 定时：本仓库调度器作业 `ic_monitor`（08:50）/ `ic_recheck`（09:20）/ `ic_weekly`（周一 09:05）
+- 定时：本仓库调度器作业 `ic_monitor`（08:50，**周一~周五+周末每天都跑**）/ `ic_recheck`（09:20）/ `ic_weekly`（周一 09:05）
+- 周末行为（2026-10-24 用户要求）：周末照跑，判的是**最新交易日**的数据
+  （周六早上 akshare 最新数据 = 周五收盘），推一份「非交易日回顾」；
+  同一份数据没有更新（周日再跑）就跳过，不刷屏。信号按数据日去重，不会重推。
 - 推送：**本机器人 1:1 通道**（tools.dingtalk_push）→ 署名是本机器人，不是「py 小助手」群机器人
 - 状态/历史：本仓库 `var/ic/`（已并入 MainToy 那条链的历史，10-22 那条抄底不会重推）
 - 手动入口：`/ic`（聊天）或 `python -m scheduler run ic_monitor`（命令行，作业 id 只能用 id）
@@ -411,7 +414,7 @@ def check_bottom_signal(df: pd.DataFrame) -> dict:
         "vol_ok": bool(vol_ok),
         "margin_ok": bool(margin_ok),
         "triggered": bool(rsi_ok and qvix_ok and vol_ok and margin_ok),
-        "data_ok": not stale,
+        "data_ok": bool(not stale),
         "stale_reason": stale_reason,
         "type": "bottom",
     }
@@ -434,9 +437,12 @@ def check_top_signal(df: pd.DataFrame) -> dict:
             if len(closes) > 0:
                 drop3 = (min(closes) / base - 1) * 100
 
-    drop_ok = pd.notna(drop3) and drop3 < -3.0
-    margin_ok = pd.notna(latest["margin_pct"]) and float(latest["margin_pct"]) > 0.90
-    qvix_rise_ok = pd.notna(latest["qvix_mom_3d"]) and float(latest["qvix_mom_3d"]) > 0
+    # 注意：这几个标志必须转成 Python bool —— pandas/numpy 的 bool_ 不是
+    # JSON 可序列化对象，会让 write_status() 的 json.dumps 直接炸
+    # （2026-10-24 单元测试撞出来的隐患：is_high=True 时心跳路径必崩）。
+    drop_ok = bool(pd.notna(drop3) and drop3 < -3.0)
+    margin_ok = bool(pd.notna(latest["margin_pct"]) and float(latest["margin_pct"]) > 0.90)
+    qvix_rise_ok = bool(pd.notna(latest["qvix_mom_3d"]) and float(latest["qvix_mom_3d"]) > 0)
 
     warn = bool(is_high and drop_ok and margin_ok)
     confirm = bool(warn and qvix_rise_ok)
@@ -614,8 +620,8 @@ def notify_dingtalk(result: dict, last_date: str = None, note: str = ""):
         logging.error(f"钉钉通知失败: {e}")
 
 
-def notify_dingtalk_heartbeat(bottom: dict, top: dict):
-    """每日心跳钉钉通知"""
+def notify_dingtalk_heartbeat(bottom: dict, top: dict, weekend: bool = False):
+    """每日心跳钉钉通知（weekend=True 时是「非交易日回顾」）"""
     # 底部状态
     b_items = [
         f"RSI(14) = {bottom['rsi14']:.1f} {_status_icon(bottom['rsi_ok'])} < 44",
@@ -641,8 +647,8 @@ def notify_dingtalk_heartbeat(bottom: dict, top: dict):
         stale_note = f"\n> ⚠️ **{bottom.get('stale_reason', '数据滞后')}**: 本轮信号拒判，数据补齐后自动恢复"
 
     lines = [
-        "## 📊 IC 监控日报",
-        f"**日期**: {bottom['date']}",
+        "## 📊 IC 非交易日回顾" if weekend else "## 📊 IC 监控日报",
+        f"**日期**: {bottom['date']}" + ("（最新交易日）" if weekend else ""),
         f"**中证500**: {bottom['spot_price']:.1f}　**IC期货**: {bottom['fut_price']:.1f}",
         "---",
         "### 🟢 抄底信号（做多）",
@@ -655,9 +661,13 @@ def notify_dingtalk_heartbeat(bottom: dict, top: dict):
     ]
     if stale_note:
         lines.append(stale_note)
+    if weekend:
+        lines.append("> 周末无新交易数据，以上是**最新交易日**的判定结果；"
+                     "开盘前如有新信号会第一时间推送。")
     try:
-        if push_bot_message("\n".join(lines), title="IC 信号心跳播报"):
-            logging.info(f"钉钉心跳已发送（{bottom['date']}）")
+        title = "IC 非交易日回顾" if weekend else "IC 信号心跳播报"
+        if push_bot_message("\n".join(lines), title=title):
+            logging.info(f"钉钉心跳已发送（{bottom['date']}{'（周末回顾）' if weekend else ''}）")
         else:
             logging.error(f"钉钉心跳发送失败（{bottom['date']}）")
     except Exception as e:
@@ -733,9 +743,10 @@ def run_once(force: bool = False, dry_run: bool = False, heartbeat: bool = True)
             last_attempt_day=now.strftime("%Y-%m-%d"),
         )
 
-    if now.weekday() >= 5 and not force:
-        logging.info("周末（%s），--once 跳过", now.strftime("%Y-%m-%d"))
-        return {"skipped": "weekend"}
+    # 周末也跑（2026-10-24 用户要求）：akshare 的「最新数据」在周六早上 = **周五收盘**
+    # （akshare 当天数据收盘后 3-5 小时才更新），所以周末这一轮是**第一次**判到周五
+    # 收盘数据，有实际价值。信号去重照旧（按数据日），周五推过的信号周末不会重推。
+    weekend = now.weekday() >= 5
 
     df = prepare_signals(load_latest_data())
     bottom = check_bottom_signal(df)
@@ -808,6 +819,7 @@ def run_once(force: bool = False, dry_run: bool = False, heartbeat: bool = True)
             payload = write_alert(bottom, last_date, note)
             notify_dingtalk(bottom, last_date, note)
             emit_signal(payload)
+            save_state(last_push_data_date=bottom["date"])
             result["sent"].append("bottom")
     # 顶部信号（预警/确认）
     elif top["triggered"] and (force or not top_done):
@@ -820,6 +832,7 @@ def run_once(force: bool = False, dry_run: bool = False, heartbeat: bool = True)
             payload = write_alert(top, last_date, note)
             notify_dingtalk(top, last_date, note)
             emit_signal(payload)
+            save_state(last_push_data_date=top["date"])
             result["sent"].append(top["type"])
 
     # 没发信号 → 每日心跳（同一天只发一次；今天已有信号就不再补心跳）
@@ -828,6 +841,10 @@ def run_once(force: bool = False, dry_run: bool = False, heartbeat: bool = True)
         if bottom["triggered"] or top["triggered"]:
             logging.info("今日信号已推送过（%s），不再补发心跳", bottom["date"])
             result["skipped"] = "signal-already-sent"
+        elif weekend and not force and load_state().get("last_push_data_date") == bottom["date"]:
+            # 周末第二轮（周日）：数据还是周五那份，没新东西就别刷屏
+            logging.info("周末回顾：%s 的数据没有更新，跳过（不刷屏）", bottom["date"])
+            result["skipped"] = "no-new-data"
         elif (load_state().get("heartbeat_day") == today) and not force:
             logging.info(f"{today} 心跳已发过，跳过")
             result["skipped"] = "heartbeat-already-sent"
@@ -836,12 +853,13 @@ def run_once(force: bool = False, dry_run: bool = False, heartbeat: bool = True)
             result["sent"].append("heartbeat(dry-run)")
         else:
             write_status(bottom, top)
-            notify_dingtalk_heartbeat(bottom, top)
-            save_state(heartbeat_day=today)
+            notify_dingtalk_heartbeat(bottom, top, weekend=weekend)
+            save_state(heartbeat_day=today, last_push_data_date=bottom["date"])
             result["sent"].append("heartbeat")
 
     if not dry_run:
-        save_state(last_result=result, last_run_day=now.strftime("%Y-%m-%d"))
+        save_state(last_result=result, last_run_day=now.strftime("%Y-%m-%d"),
+                   last_judged_date=bottom["date"])
     logging.info(f"--once 结束: sent={result['sent'] or '无'}")
     return result
 
@@ -855,7 +873,8 @@ def main():
     logging.info("=" * 60)
 
     if not is_weekday():
-        logging.info("今天不是工作日，退出")
+        logging.info("今天不是工作日，常驻模式退出"
+                     "（注意：调度器用的 --once 模式周末会跑「非交易日回顾」）")
         return
 
     # 等到次日 8:50（开盘前预警，akshare 前一天数据已更新）
@@ -944,7 +963,7 @@ if __name__ == "__main__":
     ap.add_argument("--once", action="store_true",
                     help="只跑一次检查就退出（机器人 08:50 自动调度用）")
     ap.add_argument("--force", action="store_true",
-                    help="忽略当日去重/周末限制，强制跑并重发")
+                    help="忽略当日去重/无新数据限制，强制跑并重发")
     ap.add_argument("--dry-run", action="store_true",
                     help="只计算并打印，不推送、不写状态（验证用）")
     ap.add_argument("--triggers-only", action="store_true",

@@ -617,6 +617,51 @@ def rejected_summaries(limit: int = 10) -> list[str]:
     return out
 
 
+def handled_summaries(limit: int = 20) -> list[str]:
+    """**所有**已经处理过的提案：驳回 / 暂缓 / 已落地 —— 提案器要避开。
+
+    2026-10-24 加：原来只把「被驳回」的喂给 evolve（rejected_summaries），
+    结果「暂缓」和「已落地」的主题会被当成新问题重提一遍
+    （用户反馈：evolve 提的全是之前已经改过的东西）。
+
+    - rejected  -> memory/rejected/*.json
+    - approved  -> memory/proposals/archive/*.json（archive_proposal 的落点）
+    - 暂缓      -> 状态仍是 pending，但 defer_count > 0（暂缓不冻结，见 apply_proposal.defer）
+    """
+    items: list[tuple[str, str]] = []
+
+    def collect(directory: str, default_status: str) -> None:
+        if not os.path.isdir(directory):
+            return
+        for name in sorted(os.listdir(directory), reverse=True):
+            if not name.endswith(".json"):
+                continue
+            try:
+                p = json.load(open(os.path.join(directory, name), encoding="utf-8"))
+            except Exception:
+                continue
+            if not isinstance(p, dict):
+                continue
+            title = (p.get("title") or "").strip()
+            if not title:
+                continue
+            pid = p.get("id") or os.path.splitext(name)[0]
+            status = p.get("status") or default_status
+            items.append((pid, f"- [{status}] {pid} :: {title}"))
+
+    collect(REJECTED_DIR, "rejected")
+    collect(os.path.join(PROPOSAL_DIR, "archive"), "approved")
+    for p in list_proposals("pending"):
+        if int(p.get("defer_count") or 0) > 0:
+            pid = p.get("id") or ""
+            title = (p.get("title") or "").strip()
+            if pid and title:
+                items.append((pid, f"- [暂缓] {pid} :: {title}"))
+
+    items.sort(reverse=True)          # 提案 id 带时间戳，倒序 = 新的在前
+    return [s for _, s in items[:limit]]
+
+
 if __name__ == "__main__":
     import sys
     cmd = sys.argv[1] if len(sys.argv) > 1 else "index"
