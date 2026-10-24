@@ -215,7 +215,7 @@
 | 作业 | 时间 | 脚本 |
 |---|---|---|
 | `premarket` 盘前早报 | 每天 08:00（补跑 180 分钟） | `jobs/premarket_push.py` |
-| `evolve` 知识与行为改进扫描 | 每天 09:20（补跑 720 分钟） | `tools/evolve.py` |
+| `evolve` 知识与行为改进扫描 | 每天 08:00（补跑 720 分钟） | `tools/evolve.py` |
 | `ic_monitor` IC 信号监控 | 每天 08:50（补跑 70 分钟，周末跑非交易日回顾） | `jobs/ic_signal_monitor.py` |
 | `ic_recheck` IC 信号补判 | 周一~周五 09:20（补跑 40 分钟） | `jobs/ic_signal_monitor.py --once --triggers-only` |
 | `ic_weekly` IC 周报 | 周一 09:05（补跑 100 分钟） | `jobs/ic_weekly_report.py` |
@@ -297,6 +297,8 @@
 
 | 2026-10-24 | **IC 监控周末也跑**（用户要求）：`ic_monitor` 的 `dow` 从「周一~周五」改成**每天**；脚本 `--once` 不再在周末直接 `skipped="weekend"`，改成走「非交易日回顾」分支 —— 周末 akshare 最新数据 = **周五收盘**（周五 18:00 后才更新），所以周末这一轮是**第一次**判到周五收盘数据；新增状态字段 `last_push_data_date` 记录「上次推过的数据日」——同一份数据再跑（周日）就跳过不刷屏；推送标题区分「IC 信号心跳播报 / IC 非交易日回顾」。信号按**数据日**去重（`ic_signal_history.json`），周五推过的周末不会重推。`ic_recheck` 仍限周一~周五（周末补判无意义）。**顺手修掉一个老隐患**：`check_top_signal` 的 `drop_ok/margin_ok/qvix_rise_ok` 是 numpy.bool_，`write_status()` 的 `json.dumps` 会抛 `TypeError: Object of type bool is not JSON serializable` —— 只要指数处于 60 日新高，**每日心跳/回顾就必崩**（信号路径 `write_alert` 同理），现在统一转 Python bool | `scheduler/registry.py`、`jobs/ic_signal_monitor.py`、`tests/test_ic_signal.py` |
 | 2026-10-24 | **evolve 不再提「已经改过的事」**（用户反馈：11:56 那轮提的 3 条全是之前已经确定修改过的）：根因是提案器只有「记忆索引」一个对照源 —— ① 很多改动是在对话里当场改的（IC Monitor 三条防误判规则），**没进记忆索引**，于是每次扫描都当成新问题；② `rejected_summaries()` 只把「被驳回」的喂给模型，**「暂缓」和「已落地」的主题照样被重提**；③ 提示词没告诉模型「问答存档里的 A（回答）= 当时的处理结果」。做法：① 新增 `memory_store.handled_summaries()`（驳回 / 暂缓 / 已落地 三种状态全给）；② 新增「近期已完成改动」清单（journal 里带完成标记的条目 + 当时的回答摘要）当对照表；③ 提示词加硬规则「只提还没做的事」+「回答里说已改/已撤回/已实现的不要再提」。验证：改完再跑一轮 `--dry-run`，3 条老问题变成 1 条真新问题 | `tools/evolve.py`、`tools/memory_store.py` |
+
+| 2026-10-24 | **evolve 收窄管辖范围 + 提前到 08:00**（用户两条意见：①「evolve 应该专注于 bot 自身的架构或机制优化，有必要关注具体工作吗」；②「八点多开机跑的 evolve 为什么超时未完成，我这边都没看到给我进行审批，后面补跑才审批」）。① **管辖范围**：evolve 只提 **dingtalk-agent 自身架构/机制**（交互链路、卡片/审批、调度与作业可靠性、记忆与提案机制、推送去重、超时/静默/截断、看门狗自愈、开机重启）；具体业务工作（IC 抄底摸顶规则、QVIX/融资阈值、回测口径、行情点位）和别的项目的活一律不提。做法 = 提示词加范围约束 + **确定性范围闸门**（`tools/evolve.py::in_scope`：命中业务域词表 → 丢；一个 bot 机制标志词都没有 → 丢；丢弃的记 journal `evolve_skip`，可审计）。10-24 11:56 那轮的 3 条提案（IC 融资分级 / IC QVIX 缺日 / 作业超时截断）现在会被闸门挡掉 2 条，游戏补丁那条（GP/JP vs SP 消耗）也挡掉。② **时间 09:20 → 08:00**：原来 08:40 开机后 evolve 要**白等 40 分钟**才到点，而 10-24 早上 09:00 机器被关机 → 09:20 那轮压根没启动，审批卡直到 11:54 补跑才出现（用户等了近 3 小时）。改成 08:00 + 12 小时窗口 = 开机即补跑，卡片 ~08:43 到手机；`occurrence_for` 优先取「今天」的 occurrence，不会重复跑 | `tools/evolve.py`、`scheduler/registry.py` |
 
 ---
 

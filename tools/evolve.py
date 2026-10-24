@@ -37,12 +37,87 @@ MAX_PROPOSALS = 3
 RECENT_JOURNAL = 80
 RECENT_CARDS = 20
 
+# ---------------------------------------------------------------- 管辖范围
+# evolve 只管 **dingtalk-agent 这个 bot 自身的架构与机制**：
+#   交互链路、卡片/审批、调度器与作业可靠性、记忆与提案机制、推送与去重、
+#   超时/静默/截断、看门狗与自愈、开机与重启。
+# 具体业务工作（IC 抄底摸顶规则、QVIX/融资阈值、回测口径、行情点位）
+# 和别的项目的活（游戏补丁、数值修改……）**不在管辖范围内** ——
+# 那些是"工作内容"，不是"机制问题"，混进来只会让用户重复确认已经决定过的事。
+#
+# 下面是**确定性闸门**（不靠 LLM 自觉）：命中业务域关键词 → 丢；
+# 压根看不出跟 bot 自身机制有关 → 也丢。剩下的才推审批卡。
+BUSINESS_MARKERS = (
+    "抄底", "摸顶", "顶部信号", "底部信号", "QVIX", "融资", "中证", "股指期货", "期货",
+    "回测", "止损", "止盈", "仓位", "做多", "做空", "看多", "看空", "波动率",
+    "K线", "ETF", "行情", "点位", "回撤", "交易策略", "选股", "开仓", "平仓",
+    "战斗", "蓝耗", "技能消耗", "技能升级", "SP 消耗", "数值修改", "刷图", "游戏补丁",
+)
+
+# bot 自身机制的标志词（用来确认这条提案真的跟 bot 有关）
+BOT_MARKERS = (
+    "Bot", "机器人", "DingTalk", "钉钉", "卡片", "调度", "scheduler", "记忆", "提案",
+    "审批", "evolve", "桥接", "bridge", "会话", "推送", "作业", "看门狗", "watchdog",
+    "流式", "静默", "心跳", "去重", "重试", "超时", "日志", "开机", "回复", "问答",
+    "落盘", "编码",
+)
+
 # 「已经做完」的标记。journal 里出现这些词的条目 = 当时已经把事情办了，
 # 它们是提案器的**对照表**（别再把做完的事当新问题提一遍）。
 DONE_MARKERS = ("已落地", "已修复", "全部修复", "全部改动", "全部改", "已完成",
                 "已改", "已加", "已撤回", "已实现", "已生效", "已修好")
 
+
+def in_scope(p: dict) -> tuple[bool, str]:
+    """这条提案是不是「bot 自身机制」的问题。返回 (是否保留, 原因)。
+
+    确定性判定，不经 LLM：
+    - 命中业务域关键词 → 丢（具体工作是别人的活）
+    - 一个 bot 机制标志词都没有 → 丢（跟这个 bot 没关系）
+    """
+    blob = " ".join(str(p.get(k, "")) for k in ("title", "body", "evidence"))
+    biz = [m for m in BUSINESS_MARKERS if m in blob]
+    if biz:
+        return False, f"业务域内容（{biz[0]}…），不属于 bot 自身机制"
+    if not any(m in blob for m in BOT_MARKERS):
+        return False, "看不出跟 bot 自身架构/机制有关"
+    return True, ""
+
+
+def filter_scope(props: list[dict], journal: bool = True) -> list[dict]:
+    """管辖范围闸门：只放行「bot 自身架构/机制」的提案。
+
+    放在 parse_proposals 之后、落盘/推卡之前 —— 干跑（--dry-run）也要过这一关，
+    否则干跑看到的和真跑不一样。丢掉的记 journal（kind=evolve_skip），
+    出问题能查"这条为什么没提"。
+    """
+    kept: list[dict] = []
+    for p in props:
+        ok, why = in_scope(p)
+        if ok:
+            kept.append(p)
+            continue
+        print(f"[evolve] 范围闸门丢弃（{why}）: {p.get('title', '')[:50]}")
+        if journal:
+            try:
+                ms.append_journal("evolve_skip",
+                                  f"跳过越界提案: {p.get('title', '')[:60]}",
+                                  reason=why)
+            except Exception as e:  # noqa: BLE001
+                print(f"[evolve] 记录越界提案失败: {e}", file=sys.stderr)
+    return kept
+
+
 SYSTEM_PROMPT = """你是一个 AI 助理系统的「需求抽取器」。
+
+**管辖范围（第一原则）**：只提 **dingtalk-agent 这个 bot 自身的架构与机制** 的改进：
+交互链路、卡片/审批、调度器与作业可靠性、记忆与提案机制、推送与去重、超时/静默/截断、
+看门狗与自愈、开机与重启。
+
+**不在管辖范围内**（一条都别提）：
+- 具体业务逻辑：IC 抄底/摸顶规则、QVIX/融资阈值、回测口径、行情点位、选股策略……
+- 别的项目的具体工作：游戏补丁、数值修改、其它仓库的活……
+这些是**工作内容**，不是机制问题。用户已经自己定了口径，不该再来问一遍。
 
 **你的任务只有一件（机械对照，不要发挥）**：
 把「证据」里用户**明确提出的要求 / 纠正 / 偏好**逐条挑出来，
@@ -88,6 +163,10 @@ SYSTEM_PROMPT = """你是一个 AI 助理系统的「需求抽取器」。
 - **只提还没做的事**：凡是「已处理过的提案」「近期已完成改动」里出现过的，
   或者是证据里回答已经说明「已改/已撤回/已实现」的，都不要再提一遍
   （提了就是让用户重复确认已经确认过的事 —— 这是最招人烦的失败模式）
+- **管辖范围**：只提 bot 自身的架构/机制（交互、卡片、调度、记忆、审批、
+  推送去重、超时静默、看门狗、开机重启）。具体业务工作（IC 规则、行情阈值、
+  回测口径）和别的项目的活**一条都别提** —— 提了会被系统的范围闸门直接丢掉，
+  白费一次模型调用
 
 只输出 JSON，不要解释、不要 markdown 代码块：
 {"proposals": [
@@ -516,7 +595,7 @@ def main() -> int:
         print(f"[evolve] LLM 调用失败: {e}", file=sys.stderr)
         return 1
 
-    props = parse_proposals(raw)
+    props = filter_scope(parse_proposals(raw))
     if args.json:
         print(json.dumps(props, ensure_ascii=False, indent=2))
     else:
