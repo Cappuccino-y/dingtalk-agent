@@ -1,0 +1,20 @@
+{
+  "type": "memory",
+  "title": "停机与离线必须走可感知的协同关机流程",
+  "scope": "project:dingtalk-agent",
+  "category": "decision",
+  "confidence": "high",
+  "body": "触发条件: 用户要求停止 dingtalk-agent，或机器人进入关机、离线状态。\n动作: 采用与协同重启对称的协同关机机制：停止接收新任务，排空在飞回合，向钉钉推送即将停机或已离线状态；停机应支持撤销，并设置 Windows 倒计时兜底，避免进程无提示退出。\n适用范围: dingtalk-agent 的停机、重启衔接及网络离线状态切换。",
+  "evidence": "停掉并完善相关关机等离线机制",
+  "supersedes": "",
+  "risk": "排空在飞回合可能延长停机时间；倒计时与撤销状态若不同步，可能造成重复通知或用户误判机器人仍在线。",
+  "expected_gain": "让停机和离线过程对用户可见且可控，避免任务被静默中断，并使停机与现有协同重启机制保持一致。",
+  "source": "evolve",
+  "proposed_by": "MiniMax-M3.1-Flash",
+  "id": "prop_20261026-084216_c387",
+  "created_at": "2026-10-26T00:42:16Z",
+  "status": "approved",
+  "card_pushed_ts": 1792975347.8942485,
+  "card_pushed_at": "2026-10-26T00:42:27Z",
+  "decided_at": "2026-10-26T00:44:23Z"
+}

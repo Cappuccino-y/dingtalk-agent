@@ -185,3 +185,20 @@ source.agentIds: evolve, user-approved
 动作: 在手机上选「批准 / 驳回 / 稍后再说」，看卡片是否正确收尾、桥接是否正确解析你的选择。
 适用范围: 仅测试用，落地后可直接废弃这条记忆条目。
 
+---
+memoryId: mem_852b0519_75463
+timestamp: 2026-10-26T00:44:23Z
+scope: project:dingtalk-agent
+category: decision
+title: 停机与离线必须走可感知的协同关机流程
+tags: [evolve]
+confidence: high
+trust: self
+source.messageIds: card:oc-54e798b376b9412286e9, session:ses_e93a7c677ffe7OjL1eg2oydhki, proposal:prop_20261026-084216_c387
+source.agentIds: evolve, user-approved
+---
+
+触发条件: 用户要求停止 dingtalk-agent，或机器人进入关机、离线状态。
+动作: 采用与协同重启对称的协同关机机制：停止接收新任务，排空在飞回合，向钉钉推送即将停机或已离线状态；停机应支持撤销，并设置 Windows 倒计时兜底，避免进程无提示退出。
+适用范围: dingtalk-agent 的停机、重启衔接及网络离线状态切换。
+
