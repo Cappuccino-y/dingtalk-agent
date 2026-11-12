@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -50,6 +51,88 @@ RECIPIENT_FILE = os.path.join(HERE, ".dingtalk_recipient.json")
 ENDPOINT = "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend"
 DEFAULT_TITLE = "金融助理分析"
 MAX_CHARS = 18000          # 钉钉 markdown 正文有长度上限，超出截断
+
+
+# ------------------------------------------------------------------ 排版规范化
+# 钉钉 `sampleMarkdown` 模板的 markdown 渲染器按 CommonMark 处理：
+# **同一个段落里的单个 \n 是「软换行」，渲染时被折成空格**；
+# 只有空行（\n\n，段落分隔）才真的换行。列表/标题是块级元素，自成一段。
+#
+# 后果（2026-11-12 用户实测「消息显示没有换行、格式非常不适合阅读」）：
+# 产业要闻早报里
+#     **油气/油运**｜事件（源·时间）
+#     → 影响：逻辑
+# 两行被粘成「**油气/油运**｜事件（源·时间） → 影响：逻辑」一整句；
+# 三行 `>` 脚注也被粘成一个灰块。手机上就是一坨。
+#
+# 口径：**「想让读者看到换行」→ 用空行，不要用单个 \n**。
+# 同时把模板不支持的语法降级（`#` 标题 → 加粗；`---` 分隔线 → 删掉），
+# 免得原样漏出去变成噪音。
+#
+# ⚠ 必须是**列表/引用感知**的：IC 信号卡、早报、公众号日报都靠 `- ` / `1. `
+# 列表分段，无脑把每个 \n 变成空行会把列表拆散、编号列表每条都从 1 重新开始。
+_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.*)$")
+_RULE_RE = re.compile(r"^\s{0,3}([-*_]\s*){3,}$")
+_LIST_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
+_QUOTE_RE = re.compile(r"^\s*>")
+
+
+def normalize_for_dingtalk(text: str) -> str:
+    """把 markdown 整成钉钉 `sampleMarkdown` 真能渲染出换行的样子。
+
+    - 段落内的单个 \\n → **空行**（钉钉不认软换行，这是本次的根因）
+    - 连续 `- ` / `1. ` 列表项保持成**同一个列表**（不会被拆散、不会重新编号）
+    - `## 标题` → `**标题**`（模板不支持标题）
+    - `---` 分隔线 → 删掉（模板不支持，留着只是噪音；
+      顺带避免 CommonMark 把它当成上一行的 setext 标题）
+    - 连续 `>` 引用行 → 各自成段（否则会并成一坨灰底）
+    - 空行最多留一个
+
+    幂等：跑两遍结果一样。
+    """
+    raw_lines = (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+
+    out: list[str] = []
+    in_list = False          # 当前是否在列表块里（列表项之间不插空行）
+    for raw in raw_lines:
+        line = raw.rstrip()
+        stripped = line.strip()
+        if not stripped:
+            out.append("")   # 空行 = 段落分隔
+            in_list = False
+            continue
+        if _RULE_RE.match(line):
+            out.append("")   # 分隔线 → 丢掉，但保留段落间距
+            in_list = False
+            continue
+        m = _HEADING_RE.match(line)
+        if m:
+            out.append("")
+            out.append(f"**{m.group(1).strip()}**")
+            in_list = False
+            continue
+        if _LIST_RE.match(line):
+            if not in_list:
+                out.append("")   # 新列表：前面留空行，和上一段断开
+                in_list = True
+            out.append(line)
+            continue
+        if in_list and not _QUOTE_RE.match(line):
+            # 列表项的续行（CommonMark lazy continuation）→ 留在列表块里
+            out.append(line)
+            continue
+        # 普通段落 / 引用：自成一段
+        out.append("")
+        out.append(line)
+        in_list = False
+
+    # 压掉连续空行
+    squashed: list[str] = []
+    for line in out:
+        if not line and squashed and not squashed[-1]:
+            continue
+        squashed.append(line)
+    return "\n".join(squashed).strip()
 
 
 def load_recipient() -> dict:
@@ -74,6 +157,7 @@ def push_markdown(text: str, title: str = DEFAULT_TITLE,
     if not text:
         log.warning("推送内容为空，跳过")
         return False
+    text = normalize_for_dingtalk(text)
     if len(text) > MAX_CHARS:
         text = text[:MAX_CHARS] + "\n\n…（内容过长已截断）"
 

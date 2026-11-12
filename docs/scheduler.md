@@ -33,7 +33,7 @@
                                                           │ 到点 spawn（子进程）
                              ┌────────────────────────────┼────────────────────────┐
                              ▼                            ▼                        ▼
-                     premarket 08:00              evolve 08:00（窗口 12 小时）    ic_monitor 08:50 / ic_recheck 09:20
+                     premarket 08:00              evolve 10:00（窗口 10 小时）    ic_monitor 08:50 / ic_recheck 09:20
                     （盘前早报，跑完就退）        （知识/行为改进扫描；机器      （IC 抄底/摸顶信号，2026-10-23 起
                               │                    08:40 才开机，窗口拉长 =      归本调度器；ic_weekly 周一 09:05
                               │                    当天开着就一定跑，开机即补）    出周报图）
@@ -43,12 +43,18 @@
                                     失败 → notify.py（按 key 去重，只发一次）
 
 > **IC 监控（抄底/顶部信号 + 周报）归本调度器管**（2026-10-23 从 MainToy 那条链收回）：
-> 定时作业 = `ic_monitor`（**每天** 08:50，周末跑「非交易日回顾」）/ `ic_recheck`（周一~周五 09:20）/
+> 定时作业 = `ic_monitor`（**每天** 08:50，窗口 08:50~11:50，周末跑「非交易日回顾」）/
+> `ic_recheck`（**每天** 09:20，窗口 09:20~10:00，只补真信号）/
 > `ic_weekly`（周一 09:05），
 > 脚本 = 本仓库 `jobs/ic_signal_monitor.py` / `jobs/ic_weekly_report.py`，
 > 状态/历史 = `var/ic/`（已并入 MainToy 侧历史，10-22 那条抄底不重推），
 > 推送 = **本机器人 1:1**（`tools/dingtalk_push`）→ 钉钉署名是本机器人，不是「py 小助手」群机器人。
 > `MainToy\autorun\autoworkflow.py` 已不再拉起 IC 脚本 → 不会双推。
+>
+> **推送节奏（2026-10-25 用户反馈「今天早上又没有预报」后改）**：
+> 信号按**数据日**去重（同一条信号不重推），日报/回顾按**运行日**去重 → **每天早上必有一条**；
+> 行情源比交易日历慢时，消息里明说「应到 X / 实际到 Y」；数据完整性守门触发时状态显示
+> **拒判（数据不齐）**，不再混写成「未触发」。
 ```
 
 **两个常驻进程**：bot（钉钉连接）和 scheduler（时间表）。
@@ -68,6 +74,10 @@
 - `failed` / `timeout` → 窗口内按 `retry_delay_s` 重试，最多 `max_attempts` 次；
 - 进程跑到一半调度器被杀 → 下次启动把 stale `running` 标成 `orphan`，允许重试；
 - 超过窗口还没成功 → 放弃并留记录（避免半夜补一条早报）。
+- **告警只在「没机会再试了」时推**（2026-11-02）：`retry_delay_s` 后还在窗口内、
+  且次数没用完，这次失败就只写日志不推钉钉 —— 一次网络抖动不该让手机收到
+  「执行失败」，而 3 分钟后重试其实已经成功。判定在 `daemon._can_retry`，
+  结果通过 `runner.run_job(final=...)` 传下去；手动触发一律按最终失败告警。
 
 这就是 cron 世界里常说的 misfire / coalescing：补跑要有窗口，重复执行要幂等。
 
@@ -95,10 +105,15 @@ scheduler/
 | 作业 | 脚本 | 说明 |
 |---|---|---|
 | `premarket` | `jobs/premarket_push.py` | 依赖也都在本仓库：`tools/opencode_bridge.py`、`tools/dingtalk_push.py`、`tools/market_chart.py` |
-| `evolve` | `tools/evolve.py` | 同上 |
+| `evolve` | `tools/evolve.py` | 每天 **10:00**（窗口 600 分钟，失败补跑 1 次）；2026-10-29 从 08:00 挪后，避开开机瞬间断网 |
 | `ic_monitor` | `jobs/ic_signal_monitor.py` | **本仓库权威副本**（2026-10-23 收回）；每天 08:50，**周末也跑** |
-| `ic_recheck` | `jobs/ic_signal_monitor.py --once --triggers-only` | 同上；周一~周五 09:20 补判 |
+| `ic_recheck` | `jobs/ic_signal_monitor.py --once --triggers-only` | 同上；**每天** 09:20 补判（QVIX 这类源补齐没有固定时间） |
 | `ic_weekly` | `jobs/ic_weekly_report.py` | 同上；周一 09:05 |
+| `qvix_snapshot` | `jobs/qvix_snapshot.py` | 2026-10-26 新增；**周一~周五 15:05**（窗口 120 分钟）把当天 QVIX 落到 `var/qvix/` |
+| `qvix_evening` | `jobs/qvix_snapshot.py --proxy-fill` | 2026-11-09 新增；**周一~周五 20:00**（窗口 180 分钟、8 次×10 分钟）—— 源站整天不更新时用「上交所官方 IV 自算 + 锚定链式」补缺口（`source=proxy@锚点`），抓取窗口实际延到 21:30+ |
+| `wechat_video` | `jobs/wechat_video_digest.py` | 每天 17:00（窗口 180 分钟）：抓「远道擒龙」当天复盘视频 → 下载 → ASR → MiniMax 提炼 → 推 1:1；重活在 `D:\PythonProject\wechat-monitor`（独立 venv + faster-whisper） |
+| `news_digest` | `jobs/news_digest.py` | 2026-11-11 新增；**每天 08:35**（窗口 150 分钟）：东财/新浪/同花顺/富途/金十 → 去重 → MiniMax 两遍（先挑后写）→ 分层要点。板块区只谈板块不点名，**个股重大利好单列一区**；脚本内 `--hours` 默认 **25**（2026-11-12 从 12 改：一天只跑一次，12h 窗口会让前一交易日盘中+盘后那 12h 永远抓不到；25h 留 1h 重叠余量防实跑时刻漂移）。⚠ 同日四处修复：钉钉 `sampleMarkdown` 不认段内单换行，正文改**一条一段**（`_render_items`）+ 推送层 `normalize_for_dingtalk` 兜底；调模型前**本地粗筛**掉纯行情播报（`prefilter_noise`，含事件词的一律保留）；挑选时限随批数放大 + **08:50 收工硬闸**（不跟 IC 监控抢配额）+ **跨时段轮转挑选**（超时也不偏科）+ 终稿候选按时间均匀取样（`_spread`）。实测 25h 全程 ~17 分钟，`timeout_s` 1500 → 2400 |
+| `news_digest_noon` | `jobs/news_digest.py --slot noon` | 2026-11-12 新增（用户：「不只早上推，中午也推……在 12:55 的时候要推送出来，不是 12:55 才开始推送」）。**12:20 起跑 → 内容备好后等到 12:55 再推**（脚本内 `--deliver-at` + `_wait_until`；`timeout_s` 2700 覆盖等待）。窗口 = 距早报推送至今（覆盖上午盘中，不重复早报）；本地粗筛**保留盘中异动**（`keep_intraday`），终稿多一区「盘中异动」+ 一区「个股重大利好」。版位口径见 `jobs/news_digest.py::SLOTS` |
 
 > 2026-10-23：IC 监控/周报**收回本 bot**（启动、状态、去重、推送全在本仓库），
 > MainToy 那条链的 Popen 已删 → 两边不会双推。
