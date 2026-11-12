@@ -710,6 +710,19 @@ class TestBuildMarkdownWindow(unittest.TestCase):
         self.assertIn("不构成买卖建议", md)
 
 
+class TestWindowClip(unittest.TestCase):
+    """`--since` / `--until` 复现某一段窗口（补推今天中午那一段时用）。"""
+
+    def test_clip_keeps_only_items_before_end(self):
+        end = datetime(2026, 11, 12, 12, 35)
+        items = [{"time": datetime(2026, 11, 12, 9, 0), "title": "早盘"},
+                 {"time": datetime(2026, 11, 12, 12, 34), "title": "午盘"},
+                 {"time": datetime(2026, 11, 12, 12, 36), "title": "之后"},
+                 {"time": datetime(2026, 11, 12, 21, 0), "title": "晚上"}]
+        out = nd._clip_to_window(items, end)
+        self.assertEqual([it["title"] for it in out], ["早盘", "午盘"])
+
+
 class TestDedupe(unittest.TestCase):
     def test_cross_source_merge_keeps_earliest(self):
         # 同一措辞（各源抄稿）：按 4-gram Jaccard 能合到一起

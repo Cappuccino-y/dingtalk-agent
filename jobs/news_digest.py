@@ -19,6 +19,8 @@
     python jobs/news_digest.py                # 真推
     python jobs/news_digest.py --hours 20     # 手动指定回溯窗口（默认 24）
     python jobs/news_digest.py --force        # 忽略「今天已推过」
+    python jobs/news_digest.py --slot noon    # 午间版（12:55 投递）
+    python jobs/news_digest.py --since 08:35 --until 12:35   # 复现某一段窗口（补推用）
 
 定时由 scheduler 的 `news_digest` 作业负责（**08:35**，窗口 **150** 分钟，见
 `scheduler/registry.py`；本节数字与注册表不一致时以注册表为准）。
@@ -1216,6 +1218,11 @@ def _default_hours(slot: Slot, state: dict, now: datetime | None = None) -> int:
     return slot.default_hours
 
 
+def _clip_to_window(items: list[dict], end: datetime) -> list[dict]:
+    """剔掉窗口终点之后的消息（复现某一段窗口时用）。"""
+    return [it for it in items if it["time"] <= end]
+
+
 def _wait_until(target: datetime, cap_s: int = 1800) -> None:
     """等到投递时刻再推（午间版 12:55 送达，而不是 12:55 才开始跑）。"""
     remain = (target - datetime.now()).total_seconds()
@@ -1235,6 +1242,8 @@ def main() -> int:
                     help="回溯小时数（默认：早间 25，午间 = 距早报推送的间隔）")
     ap.add_argument("--since", default=None,
                     help="回溯起点 HH:MM（今天的那个时刻），补推/复现某一段窗口时用")
+    ap.add_argument("--until", default=None,
+                    help="回溯终点 HH:MM（配合 --since 复现某一段窗口，例如复现今天中午那一段）")
     ap.add_argument("--deliver-at", default=None,
                     help="投递时刻 HH:MM（默认按版位：早间 08:50 / 午间 12:55）")
     ap.add_argument("--no-wait", action="store_true",
@@ -1252,12 +1261,21 @@ def main() -> int:
     state = _load_state()
     hours = args.hours if args.hours is not None else _default_hours(slot, state)
     cutoff: datetime | None = None
+    window_end = datetime.now()
+    if args.until:
+        hh, mm = _parse_hhmm(args.until)
+        window_end = datetime.now().replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if window_end > datetime.now():
+            window_end -= timedelta(days=1)
     if args.since:
         hh, mm = _parse_hhmm(args.since)
         cutoff = datetime.now().replace(hour=hh, minute=mm, second=0, microsecond=0)
         if cutoff > datetime.now():
             cutoff -= timedelta(days=1)
-        hours = max(1, int((datetime.now() - cutoff).total_seconds() // 3600) + 1)
+    if cutoff is None and args.until:
+        cutoff = window_end - timedelta(hours=slot.default_hours)
+    if args.since or args.until:
+        hours = max(1, int((window_end - cutoff).total_seconds() // 3600) + 1)
     deliver_at = _parse_hhmm(args.deliver_at) if args.deliver_at else slot.deliver_at
     log.info("版位=%s 投递时刻=%02d:%02d 回溯=%dh", slot.key, deliver_at[0],
              deliver_at[1], hours)
@@ -1290,6 +1308,13 @@ def main() -> int:
 
     items = dedupe(raw)
     log.info("去重：%d → %d 条", len(raw), len(items))
+
+    # --until：把窗口之后的消息剔掉（复现某一段，例如今天中午那一段）
+    if args.until:
+        before = len(items)
+        items = _clip_to_window(items, window_end)
+        log.info("窗口终点 %s：剔掉之后的 %d 条（剩 %d 条）",
+                 window_end.strftime("%m-%d %H:%M"), before - len(items), len(items))
 
     if args.no_llm:
         for it in items[:40]:
@@ -1330,7 +1355,7 @@ def main() -> int:
         body = fallback_digest(items)
 
     md = build_markdown(body, stats, len(items), hours, coverage, slot=slot,
-                        window=(cutoff, datetime.now()))
+                        window=(cutoff, window_end))
     print(md)
 
     if args.dry_run:
