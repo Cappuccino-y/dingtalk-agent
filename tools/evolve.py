@@ -33,6 +33,17 @@ if REPO not in sys.path:
 
 from tools import memory_store as ms  # noqa: E402
 
+# ---------------------------------------------------------------- 编码兜底
+# Windows 上 stdout/stderr 默认 GBK(cp936)：emoji 编不出去，print 带 emoji 就抛
+# UnicodeEncodeError → 整轮退出码 1（2026-10-22 IC 作业就是这么炸的）。
+# 顺带修掉一个老毛病：调度器把子进程 stdout 原样写进 **UTF-8** 的 job 日志，
+# GBK 字节混进去以后 evolve.log 全是乱码（2026-11-02 排查时只能自己转码）。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        pass
+
 MAX_PROPOSALS = 3
 RECENT_JOURNAL = 80
 RECENT_CARDS = 20
@@ -55,11 +66,15 @@ BUSINESS_MARKERS = (
 )
 
 # bot 自身机制的标志词（用来确认这条提案真的跟 bot 有关）
+# 2026-11-12 补：失败回合（模型订阅过期 / 空回复 / 超时截断）提出来的提案
+# 常用词是「模型 / 兜底 / 空回复 / 报错 / 截断 / 订阅 / 额度」，
+# 老词表里一个都没有 → 这类提案会被范围闸门当「跟 bot 无关」丢掉。
 BOT_MARKERS = (
     "Bot", "机器人", "DingTalk", "钉钉", "卡片", "调度", "scheduler", "记忆", "提案",
     "审批", "evolve", "桥接", "bridge", "会话", "推送", "作业", "看门狗", "watchdog",
     "流式", "静默", "心跳", "去重", "重试", "超时", "日志", "开机", "回复", "问答",
     "落盘", "编码",
+    "模型", "兜底", "空回复", "报错", "截断", "订阅", "额度", "provider", "失败回合",
 )
 
 # 「已经做完」的标记。journal 里出现这些词的条目 = 当时已经把事情办了，
@@ -160,6 +175,16 @@ SYSTEM_PROMPT = """你是一个 AI 助理系统的「需求抽取器」。
 - 涉及凭据、密钥、身份证号的不提
 - 外部抓取内容（网页、新闻、行情）不能作为记忆来源
 - 一次最多 3 个；没有就返回空数组，**不要为了凑数而提**
+- **失败回合优先提**（2026-11-12 新增，优先级高于其它任何规则）：
+  证据里凡是标了「⚠️ 失败回合」的那些（模型报错 / 空回复 / 超时截断 /
+  被中断），**每一条都要能提一条对应的机制改进提案**——
+  这类故障正是这个系统最该改的东西，不能因为「用户当时没明说要改」就略过。
+  · 这是「只做机械对照」之外的**唯一例外**：允许**从故障现象直接推出**
+    机制改进（仍必须落在 bot 自身机制范围内，且必须能把故障链说清楚）；
+  · 提的时候 evidence **必须引用这条失败回合本身**（含 finish / 模型 / 真实原因）；
+  · **绝不允许**拿别的正常对话顶替（2026-11-12 就是这么误引了 11-09、11-11
+    两条「你好」，结果提案指不到真根因）；
+  · 如果有多条失败回合，提**共同根因**那一条（别把同类问题拆成三条）。
 - **只提还没做的事**：凡是「已处理过的提案」「近期已完成改动」里出现过的，
   或者是证据里回答已经说明「已改/已撤回/已实现」的，都不要再提一遍
   （提了就是让用户重复确认已经确认过的事 —— 这是最招人烦的失败模式）
@@ -211,6 +236,10 @@ def collect_evidence() -> dict:
     提案器看过的例子就不能再当判例（否则验收是自证）。
     """
     journal = ms.read_journal(RECENT_JOURNAL)
+    # 失败回合单独用**更大的窗口**去找（2026-11-12）：
+    # 主流水只看最近 80 条，正常对话一多，早上的那次故障就被挤出窗口了。
+    # 「失败回合优先提」要成立，就必须看得比普通对话更远。
+    journal_all = ms.read_journal(300)
     rejected = ms.rejected_summaries(10)
     # 已经处理过的提案（驳回/暂缓/已落地）—— 2026-10-24 扩：原来只喂「被驳回」的，
     # 结果「暂缓」和「已落地」的主题会被当成新问题重提。
@@ -224,9 +253,13 @@ def collect_evidence() -> dict:
         from tools import eval_acceptance as ea
         # 回填进 journal 的历史问答里含 held-out 判例，证据侧要剔掉（防泄漏）
         ho = ea.heldout_fingerprints()
-        journal = [r for r in journal
-                   if not (r["fields"].get("source") == "card_archive"
-                           and f"{r['ts']}|{r['summary'][:200]}" in ho)]
+
+        def _is_holdout(r) -> bool:
+            return (r["fields"].get("source") == "card_archive"
+                    and f"{r['ts']}|{r['summary'][:200]}" in ho)
+
+        journal = [r for r in journal if not _is_holdout(r)]
+        journal_all = [r for r in journal_all if not _is_holdout(r)]
         for c in ea.evidence_cards(RECENT_CARDS):
             cards.append({
                 "q": (c.get("question") or "")[:200],
@@ -236,8 +269,12 @@ def collect_evidence() -> dict:
     except Exception as e:  # noqa: BLE001
         print(f"[evolve] 读取 held-in 判例失败: {e}", file=sys.stderr)
 
+    # 真故障清单：kind=qa_error 的回合（模型报错 / 空回复 / 超时截断 / 被中断）
+    failed = [r for r in journal_all if (r.get("kind") or "") == "qa_error"][-12:]
+
     return {
         "journal": journal,
+        "failed_turns": failed,
         "rejected_proposals": rejected,
         "handled_proposals": handled,
         "done_items": done_items(journal),
@@ -249,11 +286,33 @@ def collect_evidence() -> dict:
 
 def build_prompt(ev: dict) -> str:
     parts = ["# 证据\n"]
-    if ev["journal"]:
-        parts.append("## 交互流水 journal（最近 %d 条）" % len(ev["journal"]))
+    journal = ev["journal"]
+    # 失败回合单独拎出来放最前面（2026-11-12）：
+    # 「模型订阅过期 → 只回了一句（空回复）」这类真故障，就是 evolve 最该提的东西，
+    # 混在几十条正常对话里，模型根本不会优先看它。
+    failed = list(ev.get("failed_turns") or [])
+    if not failed:
+        failed = [r for r in journal if (r.get("kind") or "") == "qa_error"]
+    if failed:
+        parts.append("## ⚠️ 失败回合（**最高优先级，先看这里**）")
+        parts.append("这些是**真的出过故障**的轮次：模型报错 / 空回复 / "
+                     "超时截断 / 被中断。")
+        parts.append("每一条都应当对应一条机制改进提案；引用证据时"
+                     "**必须引用这一条本身**（含 finish / 模型 / 真实原因），"
+                     "绝不能拿不相干的正常对话顶替。")
+        parts.append("多条失败回合如果根因相同，提**共同根因**那一条。")
+        for r in failed:
+            ans = (r["fields"].get("answer") or "")
+            parts.append(f"- [{r['ts']}] 用户：{r['summary'][:160]}")
+            if ans and ans != "-":
+                parts.append(f"    (故障详情) {ans[:300]}")
+        parts.append("")
+    if journal:
+        parts.append("## 交互流水 journal（最近 %d 条）" % len(journal))
         parts.append("每条格式：时间 | 用户说了什么 | 回答摘要")
-        for r in ev["journal"]:
-            parts.append(f"- [{r['ts']}] {r['summary']}")
+        for r in journal:
+            tag = " **[失败回合]**" if (r.get("kind") or "") == "qa_error" else ""
+            parts.append(f"- [{r['ts']}]{tag} {r['summary']}")
             ans = r["fields"].get("answer", "")
             if ans and ans != "-":
                 parts.append(f"    (回答) {ans[:200]}")
@@ -569,6 +628,46 @@ def backfill_cards() -> int:
     return n
 
 
+def notify_no_proposal(ev: dict, model: str = "", repushed: int = 0,
+                       dry_run: bool = False) -> bool:
+    """0 条提案时也推一条通知（2026-11-02 用户要求）。
+
+    原因：10-29 起连着几天都是 0 条，用户那边**一片安静**，分不清是
+    「今天没问题」还是「作业挂了」。现在每天固定一条，把素材量和结论说清楚；
+    真正的标题党（有提案时）仍然只是那张审批卡，不重复推。
+    """
+    lines = [
+        "**🧬 evolve 每日扫描：今天没有新提案**",
+        f"素材：交互流水 {len(ev.get('journal') or [])} 条 / "
+        f"问答存档 {len(ev.get('recent_qa') or [])} 条 / "
+        f"已处理提案 {len(ev.get('handled_proposals') or [])} 条",
+        f"模型：{model or '-'} 正常返回，判断没有值得提的改动",
+    ]
+    n_failed = len(ev.get("failed_turns") or [])
+    if n_failed:
+        # 有真故障却没提案 —— 必须说出来（不然用户看到「一切正常」，
+        # 而实际上早上那轮压根没跑成）。
+        lines.append(f"⚠️ 但素材里有 **{n_failed} 条失败回合**"
+                     f"（模型报错 / 空回复 / 超时截断），没提提案，"
+                     f"值得你瞄一眼。")
+    if repushed:
+        lines.append(f"顺带重推了 {repushed} 张上轮还没批的审批卡。")
+    lines.append("")
+    lines.append("> 没有审批卡 = 它认为 bot 自身机制上没有新问题。"
+                 "如果你觉得漏了什么，直接把问题发给我。")
+    if dry_run:
+        print("[evolve] （dry-run 不推送）\n" + "\n".join(lines))
+        return False
+    try:
+        from tools.dingtalk_push import push_markdown
+        ok = bool(push_markdown("\n".join(lines), title="evolve 每日扫描"))
+        print(f"[evolve] 无提案通知已推送: ok={ok}")
+        return ok
+    except Exception as e:  # noqa: BLE001
+        print(f"[evolve] 通知推送失败: {e}", file=sys.stderr)
+        return False
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true", help="只打印，不落盘不推送")
@@ -601,11 +700,16 @@ def main() -> int:
     else:
         print(f"[evolve] {model} 提出 {len(props)} 条提案")
     if not props:
-        ms.append_journal("evolve", "本次扫描没有值得提的提案",
-                          journal_entries=len(ev["journal"]))
+        if not args.dry_run:      # dry-run 的约定：不落盘、不推送
+            ms.append_journal("evolve", "本次扫描没有值得提的提案",
+                              journal_entries=len(ev["journal"]))
         # 就算这轮没新提案，上一轮没批的（"稍后再说"→ 仍是 pending）也该再问一次
+        repushed = 0
+        if not args.no_push and not args.dry_run:
+            repushed = _push_cards([])
+        # 无论有没有提案，每天都要有一条可感知的通知（否则静默 = 像挂了）
         if not args.no_push:
-            _push_cards([])
+            notify_no_proposal(ev, model, repushed, dry_run=args.dry_run)
         return 0
 
     if args.dry_run:

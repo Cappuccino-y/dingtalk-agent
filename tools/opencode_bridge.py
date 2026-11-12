@@ -169,6 +169,72 @@ MODEL_CHOICE_TIMEOUT = _env_float("DINGTALK_MODEL_CHOICE_TIMEOUT", MODEL_CHOICE_
 CONTROL_TIMEOUT = _env_int("OC_CONTROL_TIMEOUT", 120)
 
 
+# ---- 单轮等待：软上限 / 硬上限 / 自动续做次数（2026-11-12 真机事故后改）----
+#
+# 事故形状：12:26 那轮同时干了 373 行改造 + 148 行测试 + git commit +
+# 协同重启 + 翻日志/journal 交叉验证，跑了 30 分钟；桥接层到
+# WAIT_TIMEOUT=1800 就**主动截断**，只给用户回了个占位符
+# （「回一句继续刚才的」）。但模型**并没有停**——12:58 照样提交了
+# 9d06c67，活干完了，只是用户这边断了线，只能靠用户自己想起来再问一次。
+#
+# 现在的口径（用户要求：「超时不要回复先停在这里，要自动接着做」）：
+#   软上限 WAIT_TIMEOUT      = 只是**提醒**用户「还在跑，我继续等」，**不截断**；
+#   硬上限 WAIT_HARD_TIMEOUT  = 认为这轮可能卡死 → **自动续做**：给同一个会话
+#                               补一条「接着刚才的活继续」的指令，再开一个新窗口；
+#   续做次数用尽              = 才认输收尾（并如实告诉用户已续做几次）。
+# 结果：「模型还在干活」不再等于「用户这边断了线」。
+WAIT_HARD_TIMEOUT = _env_int("DINGTALK_WAIT_HARD", 3600)
+AUTO_CONTINUE_MAX = _env_int("DINGTALK_AUTO_CONTINUE_MAX", 3)
+
+# 自动续做时投给同一个会话的指令（用户原话 + 续做要求 = 桥接层自己拼的，
+# 不是用户发的，所以措辞必须自解释，避免模型以为用户改了主意）。
+AUTO_CONTINUE_PROMPT = (
+    "【自动续做】上一轮在等待窗口内没有跑完就被中断/卡住了。"
+    "请**接着上一轮没做完的事继续做**：已经做完的部分不要重做，"
+    "从中断的地方接着往下做（该改的代码接着改、该跑的测试接着跑、"
+    "该验证的接着验证）；如果上一轮其实已经做完了，"
+    "就直接给出最终结论，并把结论说清楚。不要重新从头解释一遍。"
+)
+
+# 等待策略的三个动作（见 wait_policy）
+WAIT_KEEP = "wait"          # 软上限：继续等，别打断模型
+WAIT_CONTINUE = "continue"  # 硬上限：自动续做（补一条「继续」的指令）
+WAIT_GIVEUP = "giveup"      # 续做次数用尽：只能收尾
+
+
+def wait_policy(window: float, n_continue: int, waited: float = 0.0,
+                hard: float = None, max_continue: int = None) -> tuple[str, str]:
+    """等超时了该怎么办 —— 返回 (动作, 给用户看的一句话)。
+
+    动作：
+      "wait"     —— 软上限到了，**继续等**（模型多半还在干活，别打断它）；
+      "continue" —— 硬上限到了，**自动续做**：给同一个会话补一条
+                     「接着刚才的活继续」的指令，再开一个新窗口；
+      "giveup"   —— 续做次数用尽，只能收尾（并如实告诉用户续做了几次）。
+
+    纯函数（不碰线程、不碰 opencode），所以能直接单测：
+    「软上限不许截断」「硬上限必须续做」「次数用尽才认输」三条口径
+    都钉在这里，改坏了测试会红。
+
+    参数：
+      window      —— 当前这个等待窗口已经等了多久（秒，每次超时加一个
+                     WAIT_TIMEOUT；硬上限就是按这个累计比）
+      n_continue  —— 已经自动续做过几次
+      waited      —— 这一轮累计等了多久（秒），只影响文案
+    """
+    hard = WAIT_HARD_TIMEOUT if hard is None else hard
+    max_continue = AUTO_CONTINUE_MAX if max_continue is None else max_continue
+    if window < hard:
+        return WAIT_KEEP, (f"⏱ 这一轮累计跑了 {int(waited // 60)} 分钟还没结束，"
+                           f"我**继续等**，不用你催")
+    if n_continue >= max_continue:
+        return WAIT_GIVEUP, (f"⏱ 累计 {int(waited // 60)} 分钟还没跑完，"
+                            f"我先停在这儿")
+    return WAIT_CONTINUE, (f"⏱ 连续 {int(window // 60)} 分钟没跑完，"
+                           f"我**自动续做**（第 {n_continue + 1} 次），"
+                           f"接着刚才的活继续")
+
+
 # 事件流（SSE /api/event）重连退避（秒）。
 EVENT_RECONNECT_DELAYS = (0.5, 1, 2, 5, 10)
 # 兜底轮询间隔（秒）与「事件静默多久算落后」的阈值。
@@ -1329,7 +1395,8 @@ def journal_turn(conv, question, answer, session_id="", kind="qa_turn"):
 
 
 def turn_journal_record(final_text: str, finish: str = "", model: str = "",
-                        detail: str = "", interrupted: bool = False
+                        detail: str = "", interrupted: bool = False,
+                        truncated: bool = False, auto_continue: int = 0
                         ) -> tuple[str, str]:
     """决定这一轮要不要写进 journal（evolve 的证据源），写成什么。
 
@@ -1344,9 +1411,13 @@ def turn_journal_record(final_text: str, finish: str = "", model: str = "",
     现在：**失败回合照记**，而且必须带上**真实原因**（模型 + 报错摘要），
     否则下一轮 evolve 看到的还是「只有症状、没有原因」。
     正常回合原样记（kind=qa_turn）；失败/被中断记成 kind=qa_error。
+
+    超时截断（truncated=True）也归 qa_error：那一轮的活**没做完**，
+    对 evolve 来说正是「用户那边断了线」这类机制问题的素材，
+    不能当成正常回合一笔带过。
     """
     txt = (final_text or "").strip()
-    failed = (finish == "error") or (not txt) or (txt == "（空回复）")
+    failed = (finish == "error") or (not txt) or (txt == "（空回复）") or truncated
     if interrupted:
         failed = True
     if not failed:
@@ -1355,6 +1426,8 @@ def turn_journal_record(final_text: str, finish: str = "", model: str = "",
     bits = []
     if interrupted:
         bits.append("这一轮被中断")
+    elif truncated:
+        bits.append(f"这一轮超时截断（自动续做 {int(auto_continue or 0)} 次仍未跑完）")
     else:
         bits.append(f"这一轮失败：finish={finish or 'unknown'}")
     if model:
@@ -3603,6 +3676,14 @@ class AgentTurn:
             "stale": False,
             # 本轮是否**等超时**（还没跑完就被桥接层收尾）
             "timed_out": False,
+            # 本轮已经**自动续做**了几次（2026-11-12 起：超时不再直接截断，
+            # 而是补一条「接着刚才的活继续」的指令给同一个会话）。
+            "auto_continue": 0,
+            # 这一轮累计等了多久（秒）。
+            "waited_total": 0.0,
+            # 等待线程攒的提示（软上限提醒 / 自动续做通知）——由主线程取走
+            # 并写进卡片（卡片写入只在主线程做，避免和事件流抢）。
+            "pending_note": None,
         }
 
         prev_id = None
@@ -3617,17 +3698,65 @@ class AgentTurn:
         done = threading.Event()
 
         def _waiter():
+            """等这一轮跑完。
+
+            2026-11-12 之前这里是「一次 wait_idle，超时就认输」——
+            30 分钟到点直接截断，用户拿到的只有半截正文 + 一句
+            「回一句继续刚才的」。而模型其实**还在干活**（事故那轮
+            12:58 还提交了 commit）。
+
+            现在改成三段：
+              ① 软上限到点 → **只是提醒**用户「还在跑，我继续等」，继续等；
+              ② 硬上限到点 → 认为这轮卡死 → **自动续做**（补一条「继续」
+                 的指令给同一个会话），再开一个新窗口；
+              ③ 续做次数用尽 → 才认输收尾，并如实告诉用户续做了几次。
+            """
+            total = 0.0
+            window = 0.0
+            n_cont = 0
             try:
                 time.sleep(0.3)
-                oc.wait_idle(sid, timeout=WAIT_TIMEOUT)
-            except requests.exceptions.ReadTimeout:
-                # 等超时 = 这一轮还没跑完，**不是**失败。
-                # 必须记下来：否则半截正文会被当成最终回答收尾（见下方 timed_out 分支）。
-                st["timed_out"] = True
-                logger.warning("等待超时（%.0fs），本轮未跑完：sid=%s", WAIT_TIMEOUT, sid)
-            except Exception as e:  # noqa: BLE001
-                logger.warning("wait_idle error: %s", e)
+                while True:
+                    try:
+                        oc.wait_idle(sid, timeout=WAIT_TIMEOUT)
+                        # 跑完了（哪怕超过了软上限）→ 正常收尾，**不算超时**。
+                        st["timed_out"] = False
+                        break
+                    except requests.exceptions.ReadTimeout:
+                        # 等超时 = 这一轮还没跑完，**不是**失败。
+                        total += WAIT_TIMEOUT
+                        window += WAIT_TIMEOUT
+                        action, msg = wait_policy(window, n_cont, waited=total)
+                        if action == WAIT_KEEP:
+                            # 软上限：提醒一下，**继续等**（模型多半还在干活）。
+                            st["pending_note"] = msg
+                            continue
+                        if action == WAIT_GIVEUP:
+                            st["timed_out"] = True
+                            st["pending_note"] = msg
+                            logger.warning(
+                                "等待超时（累计 %.0fs，自动续做 %d 次仍没跑完）：sid=%s",
+                                total, n_cont, sid)
+                            break
+                        # WAIT_CONTINUE：硬上限到了，这轮大概率卡死了 → 自动续做。
+                        n_cont += 1
+                        st["auto_continue"] = n_cont
+                        st["pending_note"] = msg
+                        res = self._auto_continue(oc, sid, prev_id)
+                        if res == "done":
+                            # 其实已经答完了（wait_idle 偶尔会误报超时）。
+                            st["timed_out"] = False
+                            break
+                        if res != "sent":
+                            st["timed_out"] = True
+                            logger.warning("自动续做失败，本轮只能收尾：sid=%s", sid)
+                            break
+                        window = 0.0
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("wait_idle error: %s", e)
+                        break
             finally:
+                st["waited_total"] = total
                 done.set()
 
         threading.Thread(target=_waiter, daemon=True).start()
@@ -3642,6 +3771,17 @@ class AgentTurn:
                 ev = None
             if ev is not None:
                 self._apply_event(ev, st, writer)
+
+            # 等待线程攒的提示（软上限提醒 / 自动续做通知）。
+            # 卡片写入统一在主线程做：等待线程只负责置标志。
+            note = st.get("pending_note")
+            if note:
+                st["pending_note"] = None
+                if writer:
+                    try:
+                        writer.note(note)
+                    except Exception:  # noqa: BLE001
+                        pass
 
             now = time.time()
 
@@ -3704,7 +3844,59 @@ class AgentTurn:
             "message": st["message"],
             "stale": st["stale"],
             "timed_out": st.get("timed_out", False),
+            "auto_continue": int(st.get("auto_continue") or 0),
+            "waited_total": float(st.get("waited_total") or 0.0),
         }
+
+    @staticmethod
+    def _auto_continue(oc, sid, prev_id) -> str:
+        """自动续做：给同一个会话补一条「接着刚才的活继续」的指令。
+
+        返回 "done" / "sent" / "failed"。
+
+        为什么不是「再等一轮」：wait_idle 超时只说明**这一轮还没结束**，
+        模型可能正卡在某个长工具上（跑测试、抓接口）。光等没用，
+        得让它自己动起来 —— 续做指令带的是同一段上下文，模型能接着干。
+
+        为什么先看 REST 再投：wait_idle 偶尔会因为会话尾部残留而误报超时。
+        如果这一轮其实已经答完（有新的 assistant 消息且 finish=stop/error），
+        就别再投指令了 —— 投了等于让模型白跑一遍。
+
+        为什么投不进去还要 interrupt：opencode 在会话忙时可能拒绝新消息。
+        这时先把卡死的那一轮打断，再投续做指令（这正是「自动接着做」要的效果：
+        打断卡住的活，模型带着已有上下文继续）。
+
+        ⚠️ 绝不打断「还在正常跑」的轮次：续做只在硬上限（默认 60 分钟）之后
+        才触发，那时的轮次已经超过正常长任务的长度。
+        """
+        try:
+            m = oc.last_assistant(sid)
+        except Exception:  # noqa: BLE001
+            m = None
+        if m and (not prev_id or m.get("id") != prev_id) \
+                and (m.get("finish") or "") in ("stop", "error"):
+            # 这一轮其实已经答完了 —— 按正常完成收尾。
+            # （最终正文由主循环收尾时那次 force=True 的 REST 同步取，
+            #   这里不在等待线程里改 st，避免和主线程抢同一份状态。）
+            return "done"
+        try:
+            oc.prompt(sid, AUTO_CONTINUE_PROMPT)
+            logger.info("自动续做指令已投递：sid=%s", sid)
+            return "sent"
+        except Exception as e:  # noqa: BLE001
+            logger.warning("自动续做指令投递失败：%s；改用 interrupt 后重投", e)
+        try:
+            oc.interrupt(sid)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("interrupt 失败：%s", e)
+            return "failed"
+        try:
+            oc.prompt(sid, AUTO_CONTINUE_PROMPT)
+            logger.info("自动续做指令已投递（打断后重投）：sid=%s", sid)
+            return "sent"
+        except Exception as e:  # noqa: BLE001
+            logger.warning("自动续做重投失败：%s", e)
+            return "failed"
 
     @staticmethod
     def _apply_event(ev, st, writer=None):
@@ -3952,14 +4144,24 @@ class AgentTurn:
                 # 把半截正文当最终回答交出去，用户会以为"就这？"——
                 # 2026-10-22 那张卡就是这么只剩 64 个字的。
                 # 所以：如实标注截断 + 给出续做入口，别装作答完了。
-                tail = (f"\n\n⏱ 这一轮等了 {WAIT_TIMEOUT // 60} 分钟还没跑完，"
+                #
+                # 2026-11-12 起口径变了：**能自动续做就不会走到这里**。
+                # 软上限（30 分钟）只提醒、继续等；硬上限（默认 60 分钟）
+                # 自动补一条「接着刚才的活继续」的指令再开新窗口。
+                # 走到这里 = 自动续做次数已用尽，它确实没跑完。
+                n_cont = int(run.get("auto_continue") or 0)
+                waited_min = int((run.get("waited_total") or 0) // 60)
+                tail = (f"\n\n⏱ 这一轮累计等了 {waited_min} 分钟"
+                        f"（已自动续做 {n_cont} 次）还没跑完，"
                         f"我先停在这儿（**上面的内容可能没做完**）。"
                         f"回一句「继续刚才的」我就接着做。")
                 final_text = (final_text + tail) if final_text else (
-                    f"⏱ 这一轮等了 {WAIT_TIMEOUT // 60} 分钟还没跑完，我先停在这儿。"
+                    f"⏱ 这一轮累计等了 {waited_min} 分钟"
+                    f"（已自动续做 {n_cont} 次）还没跑完，我先停在这儿。"
                     f"回一句「继续刚才的」我就接着做。")
                 if writer:
-                    writer.note(f"⏱ 等超时（{WAIT_TIMEOUT // 60} 分钟），本轮被截断")
+                    writer.note(f"⏱ 等超时（{waited_min} 分钟，"
+                                f"自动续做 {n_cont} 次），本轮被截断")
             elif not final_text:
                 if fb_err:
                     # 别再只丢一个"（空回复）"给用户——把真正的失败原因说出来。
@@ -4009,7 +4211,9 @@ class AgentTurn:
                 model=run.get("model") or "",
                 detail=(error_summary(run.get("message"))
                         if run.get("message") else ""),
-                interrupted=interrupted)
+                interrupted=interrupted,
+                truncated=timed_out,
+                auto_continue=int(run.get("auto_continue") or 0))
             if jrec:
                 journal_turn(msg.conversation_id, text, jrec,
                              session_id=sid, kind=jkind)

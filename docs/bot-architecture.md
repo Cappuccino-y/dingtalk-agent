@@ -114,9 +114,20 @@
    - 投递：`POST /api/session/{id}/prompt`。
    - 流式：`EventBus` 订阅 SSE `/api/event`，拿 `session.text.delta` / `session.tool.*`
      逐字推卡片；**正确性**靠 `wait_idle`（完成信号）+ 3 秒兜底轮询（事件流是易失的，
-     6 秒没有新事件视作过期）。整轮硬超时 900 秒。
+     6 秒没有新事件视作过期）。
+   - **等待策略（2026-11-12 改，三段）**：整轮**不再**「30 分钟一到就截断」。
+     ① 软上限 `WAIT_TIMEOUT=1800`（30 分钟）= 只是**提醒**用户「还在跑，我继续等」，
+     **继续等**（模型多半还在干活）；② 硬上限 `WAIT_HARD_TIMEOUT=3600`（60 分钟）=
+     认为这轮卡死 → **自动续做**：给同一个会话补一条「接着刚才的活继续」的指令，
+     再开一个新窗口（最多 `AUTO_CONTINUE_MAX=3` 次）；③ 次数用尽才认输收尾，
+     并如实告诉用户「累计等了 N 分钟、自动续做 M 次」。
+     真机事故依据：11-12 12:26 那轮 30 分钟到点被腰斩，用户只拿到占位符，
+     而模型 12:58 照样提交了 commit —— 活干完了，只是用户这边断了线。
+     决策逻辑抽成纯函数 `wait_policy()`（好单测，见 `tests/test_auto_continue.py`）。
    - 收尾：取最后一条 assistant 消息，按块拼接正文 + 工具轨迹，写页脚（耗时/模型），
      卡片终态化，写 `card_archive`，清 `inflight`。
+     **被截断的回合也要写 journal**（kind=`qa_error`，带上续做次数）——
+     否则「用户那边断了线」这件事又从 evolve 的证据源里消失（11-12 教训）。
 6. **模型**：默认 `minimax-cn-coding-plan/MiniMax-M3.1-Flash`
    （⚠️ 2026-11-12 起：火山 Agent Plan 订阅到期，`volcengine-agent-plan/*`
    一律秒失败；续费后把 `DEFAULT_MODEL` 改回
@@ -243,15 +254,24 @@
 ## 七、调度器（本体 + 作业全在本仓库）
 
 本仓库带 `scheduler/` 整套代码（stdlib 实现，约 200 行主循环 + SQLite 运行记录），
-`JOBS` 清单里有**三个作业**，脚本都在本仓库的 `jobs/`：
+`JOBS` 清单里有**九个作业**（脚本大多在本仓库的 `jobs/`）：
 
 | 作业 | 时间 | 脚本 |
 |---|---|---|
 | `premarket` 盘前早报 | 每天 08:00（补跑 180 分钟） | `jobs/premarket_push.py` |
-| `evolve` 知识与行为改进扫描 | 每天 08:00（补跑 720 分钟） | `tools/evolve.py` |
-| `ic_monitor` IC 信号监控 | 每天 08:50（补跑 70 分钟，周末跑非交易日回顾） | `jobs/ic_signal_monitor.py` |
+| `news_digest` 产业要闻早报 | 每天 08:35（补跑 150 分钟） | `jobs/news_digest.py` |
+| `ic_monitor` IC 信号监控 | 每天 08:50（补跑 180 分钟，周末跑非交易日回顾） | `jobs/ic_signal_monitor.py` |
+| `ic_weekly` IC 周报 | 每周一 09:05（补跑 100 分钟） | `jobs/ic_weekly_report.py` |
 | `ic_recheck` IC 信号补判 | 周一~周五 09:20（补跑 40 分钟） | `jobs/ic_signal_monitor.py --once --triggers-only` |
-| `ic_weekly` IC 周报 | 周一 09:05（补跑 100 分钟） | `jobs/ic_weekly_report.py` |
+| `evolve` 知识与行为改进扫描 | 每天 10:00（补跑 600 分钟） | `tools/evolve.py` |
+| `qvix_snapshot` QVIX 收盘快照 | 周一~周五 15:05（补跑 120 分钟） | `jobs/qvix_snapshot.py` |
+| `wechat_video` 公众号视频日报 | 每天 17:00（补跑 180 分钟） | `D:\PythonProject\wechat-monitor`（外部作业） |
+| `qvix_evening` QVIX 晚间补采 | 周一~周五 20:00（补跑 180 分钟） | `jobs/qvix_snapshot.py --proxy-fill` |
+
+> ⚠️ 2026-11-12 校对：这张表原来写 evolve「每天 08:00」，实际注册表
+> **2026-10-29** 就挪到 10:00（开机瞬间 08:41 网络还没起来，08:00 那次白跑，
+> 两个模型全 Connection error）。**以 `scheduler/registry.py` 为准**。
+> 同样的表在 `README.md` 里也有一份，改时间要两处一起改。
 
 **IC 监控（抄底/顶部信号 + 周报）2026-10-23 起收回本仓库**（用户明确：
 「我当时的决定是错误的，改回来，这个 icmonitor 完全由你控制」）：
@@ -356,6 +376,7 @@
 | 2026-11-12 | **模型兜底从「单模型 + provider 级守卫」改成「候选链 + 精确比对」**（用户问「AgentPlan 过期了为什么没走 m3.1 MiniMax 兜底」）。**真因（真机日志为准）**：08:49–09:00 四轮全部 `finish=error chars=5`（"（空回复）"），**没有**"切换兜底模型"那行日志 → 兜底分支根本没进。① **关键词表漏词**：`_QUOTA_ERROR_PAT` 只有 quota / insufficient / 欠费 这类词，而火山 Agent Plan 到期的原文是 "does not have a valid AgentPlan subscription, or your subscription has expired" —— 一个旧词都不命中 → `is_quota_error()` 判 False → 不切不重试。② **守卫写错**：`cur_pid != FALLBACK_MODEL["providerID"]` 只比 providerID；默认模型改成 minimax-cn-coding-plan/MiniMax-M3.1-Flash 之后兜底也在同一 provider → 这条守卫**恒为 False** → 就算关键词命中了也进不去。③ **兜底跟主模型共用配额池**：同 provider 的兄弟模型在"额度耗尽"时大概率一起挂，跨 provider 才真的兜得住。**改法**：① `_QUOTA_ERROR_PAT` 补 subscription / subscribe / expired / agentplan / not activated / 订阅 / 已过期 / 到期；② 新增 `tools/model_fallback.py`（纯逻辑，可单测）：`FALLBACK_CHAIN` = `minimax2/MiniMax-M3`（第二把 key，独立额度）→ `deepseek/deepseek-v4-pro`（独立账号）→ `opencode/minimax-m3.1-flash-free`（免费档，最后一张牌）→ `minimax-cn-coding-plan/MiniMax-M3`（同 provider，排最后）；`candidates()` 按"**跨 provider 优先 + 本机 /api/model 里真实存在 + 不是刚失败的那个**"排序，取不到清单就返回空（宁可不切，也不切一个不存在的 id —— 切换接口不校验 id，2026-10-22 踩过）；③ 桥接层改成**逐个试**：每个候选都 `switch_model` → **回读 `session.model` 校验** → 重投一轮；这个兜底也不可用就试下一个；④ `jobs/premarket_push.py` 早报用同一套链；⑤ `/model` 候选换成实测能出字的三个（原来的 volcengine-agent-plan 两个已随订阅到期变死模型）。**测试** 新增 `tests/test_model_fallback.py` 12 项（链内无重复 / 跨 provider 优先 / 同 provider 降级 / 跳过失败模型 / 跳过清单外 id / 清单取不到就拒绝 / tried 集合生效 / 候选链解析），全套 **125 项通过**；**端到端实测**（真 API）：主模型 AgentPlan 报订阅到期 → 切 `minimax2/MiniMax-M3` → 回读一致 → 重投 → `finish=stop`、真出字。⚠️ 桥接层改了**要重启机器人才生效**（重启会清空钉钉侧对话上下文） | `tools/model_fallback.py`、`tools/opencode_bridge.py`、`jobs/premarket_push.py`、`tests/test_model_fallback.py` |
 | 2026-11-12 | **审批卡「重复投递」幂等化：把一次成功的审批显示成 ❌ 的坑**（用户引用 11:56 那张卡问「这个提案为什么不存在」）。**真因（真机日志为准）**：11:56:25.699 收到提交回调 → 两条提案**都成功落地**（`mem_35a8bff8_55785` commit 976a7c9、`mem_676da271_55787` commit e91d040）；11:56:28.722 **同一份表单被再投一次**（间隔 0.84s）→ 提案已在 `proposals/archive/`、`load_proposal` 读不到 → 报「提案不存在」→ 卡片终态被覆盖成 ❌。重复投递的触发者就是**我们自己**：回写卡片状态的 `finish_ask_card`（PUT /card/instances）会让钉钉把旧表单值再投一次。10-26 08:44 已经中过同样的招（一次 ✅ 紧跟一次 ❌），一直没人发现。**改法（两层）**：① 桥接层去重 —— 按 `(question_id + 答案内容)` 记指纹，窗口 60s 内同一份回调第二次到达**整体忽略、不改卡片终态**（`_EVOLVE_SEEN`）；⚠️ 登记**不撤销**，否则「回写 → 重复 → 再回写」会成无限循环。② 存储层认状态 —— 新增 `memory_store.load_decided_proposal()` / `proposal_state()`（pending / approved / rejected / missing），`apply_proposal` 的 approve / reject / defer 遇到**已结算**的提案一律回「重复提交，已忽略」，绝不报「提案不存在」；`defer` 更不会把已批准的提案写回待审批目录。③ 卡片文案同步：已结算时写「✅ 重复提交，已忽略（该提案此前已批准落地）」，不再出现 ❌。**测试** 新增 `tests/test_proposal_idempotency.py` 10 项（状态判定 / 三种动作幂等 / defer 不复活 / 重复回调不重复执行且不覆盖卡片 / 换答案照常执行 / 真 id 不存在仍报错），全套 **113 项通过**；另用 11-12 真实回调参数做端到端复现：第一次回「重复提交，已忽略」，第二次被闸门拦下，卡片回写只发生 1 次 | `tools/opencode_bridge.py`、`tools/memory_store.py`、`tools/apply_proposal.py`、`tests/test_proposal_idempotency.py` |
 | 2026-11-12 | **失败回合不再被「证据源」排除（evolve 终于看得见真故障）**（用户：「为什么自动 evolve 没有发现这个早上的异常并报出批案」）。**真因（真机日志 + journal 实证）**：早上 09:00:22 主模型订阅过期 → 该轮 `finish=error chars=5`，用户只收到 5 个字「（空回复）」；而 `journal_turn()` 的写入规则写着「「（空回复）」这种没有信息量的不记，免得污染证据」→ **这次失败被显式排除在证据源之外**。结果 `memory/journal.md` 里 **11-12 上午（00:00–09:59）一条记录都没有**（grep `2026-11-12T0` 零命中），evolve 10:01:51 扫描时压根没拿到这次异常 → 只能提一条误引旧对话的「空回复」提案（`prop_20261112-100149_c7ef` 引的是 11-09、11-11 两条正常「你好」）。**时序不是原因**：evolve 实际在 **10:00**（README 写 08:00 已过时；注册表 2026-10-29 从 08:00 挪到 10:00，窗口 10:00~20:00 补跑），比 09:00 的故障**晚**，本该看见。**改法**：① 桥接层新增 `turn_journal_record()`：`finish=error` / 只落占位符 / 被中断的回合**照记**，并带上 **finish + 模型 + 真实报错原因**，journal kind 记成 `qa_error`（正常回合仍是 `qa_turn`）；② 失败回合的 journal answer **不用用户可见文案**，改成结构化一行（`这一轮失败：finish=error；模型 X；原因：…`），保证「有原因」而不是「有症状」；③ `journal_turn` 的 kind 参数透传，`memory_store.read_journal()` 不用改（kind 本来就解析 header）。**测试** 新增 `tests/test_turn_journal.py` 8 项（正常回合仍是 qa_turn / finish=error 带模型与原因 / 占位符不再被丢 / 无错误详情也记 / 中断也记 / 空回复也记 / 9d06c67 之后的新错误文案同样进证据源 / kind 真的落进 journal 文件），全套 **133 项通过**。⚠️ 桥接层改了**要重启机器人才生效**（重启会清空钉钉侧对话上下文）；evolve 下一次扫描（明天 10:00）即可看到这类失败回合 | `tools/opencode_bridge.py`、`tests/test_turn_journal.py` |
+| 2026-11-12 | **「超时截断」改成「软提醒 → 自动续做 → 才认输」+ evolve 失败回合优先提 + 文档口径对齐**（用户引用 12:56 那张卡问「怎么回事」，并要求：「对于之前的超时问题需要你能够自动重试，不要回复先停在这里，需要你自动接着做」）。**真因**：11-12 12:26 那轮同时干了 373 行桥接层改造 + 148 行测试 + git commit + 协同重启 + 翻日志/journal 交叉验证 → 跑满 30 分钟，桥接层到 `WAIT_TIMEOUT=1800` 就**主动截断**，只回占位符「回一句继续刚才的」；而模型**并没有停**（12:58 照样提交 9d06c67，13:05 重启生效）—— 活干完了，只是用户这边断了线。**改法**：① **等待策略三段化**（`tools/opencode_bridge.py`）：软上限 `WAIT_TIMEOUT=1800` 只**提醒**（卡片页脚「我继续等，不用你催」）并**继续等**；硬上限 `WAIT_HARD_TIMEOUT=3600`（默认 60 分钟）判「这轮卡死」→ **自动续做**：给**同一个会话**补一条「【自动续做】接着上一轮没做完的事继续做」的指令再开新窗口（最多 `AUTO_CONTINUE_MAX=3` 次）；次数用尽才收尾，并如实写「累计等了 N 分钟（已自动续做 M 次）」。⚠️ 续做**只在硬上限之后**触发（正常长任务不被打断）；投指令前先查 REST（这一轮其实已答完就别投），会话忙到投不进去才 `interrupt` 后重投。决策逻辑抽成纯函数 `wait_policy()`，好单测。② 等待线程只置标志，卡片写入仍统一在主线程（避免和事件流抢卡片）。③ 被截断的回合也要进 journal（`turn_journal_record(truncated=True, auto_continue=N)` → kind=`qa_error`）—— 否则「用户那边断了线」又从证据源消失。④ **evolve 失败回合优先提**：journal 里 kind=`qa_error` 的用**更大窗口**（300 条 vs 主流水 80 条）单独收集成 `failed_turns`，在 `build_prompt` 里放到证据**最前面**并标「最高优先级」；SYSTEM_PROMPT 加硬规则「失败回合每条都要能提一条机制改进提案、evidence 必须引用它本身、绝不允许拿别的正常对话顶替」；`BOT_MARKERS` 补「模型/兜底/空回复/报错/截断/订阅/额度/失败回合」——否则这类提案会被范围闸门当「跟 bot 无关」丢掉；`notify_no_proposal` 在「0 提案但有失败回合」时明说。⑤ **历史补录**：11-12 早上那 4 轮（08:49:59 / 08:50:14 / 08:50:34 / 09:00:22，模型 `deepseek-v4.1-flash`，原因 `does not have a valid AgentPlan subscription`）按 opencode 会话里的真实报错补进 journal（kind=`qa_error`）—— 明天的 10:00 扫描就能看见今天早上的真故障。⑥ **文档口径对齐**：README 的作业表原来写 evolve「每天 08:00」、`docs/bot-architecture.md` 的作业表写「08:00（补跑 720 分钟）」、`docs/self-improvement.md` 写「每日 08:00 / 12 小时窗口」、`memory/README.md` 写「每日 03:00」—— 实际注册表 **2026-10-29** 起就是 **10:00（补跑 600 分钟）**。两张作业表按注册表重抄（补齐 news_digest / qvix_snapshot / qvix_evening / wechat_video 四个漏掉的），并注明「以 registry.py 为准」。**测试** 新增 `tests/test_auto_continue.py` 17 项（软上限不截断 / 硬上限必续做 / 次数用尽才认输 / 已答完不重投 / 会话忙则 interrupt 后重投 / 续做失败如实上报 / 截断回合进 qa_error / 失败回合进提示词优先段 / 失败提案过范围闸门 / 0 提案通知点名失败回合），全套 **150 项通过**。⚠️ 桥接层改了**要重启机器人才生效**（重启会清空钉钉侧对话上下文） | `tools/opencode_bridge.py`、`tools/evolve.py`、`tests/test_auto_continue.py`、`README.md`、`docs/bot-architecture.md`、`docs/self-improvement.md`、`memory/README.md` |
 
 ---
 

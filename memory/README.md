@@ -63,7 +63,7 @@ ms.list_proposals("pending")
 ## 提案-审批闭环
 
 ```
-evolve 作业（scheduler 每日 03:00）
+evolve 作业（scheduler 每日 10:00）
   └─ tools/evolve.py —— 直连 LLM（llm_client），**没有工具、没有文件访问**
        ├─ 证据 = journal + held-in 判例 + 记忆摘要（held-out 已剔除，防泄漏）
        ├─ 确定性去重闸门：evidence_seen / find_similar / 上限预检

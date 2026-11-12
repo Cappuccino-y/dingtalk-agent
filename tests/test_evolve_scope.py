@@ -21,6 +21,7 @@ if str(REPO) not in sys.path:
 
 from tools import evolve  # noqa: E402
 from tools import memory_store as ms  # noqa: E402
+from unittest import mock  # noqa: E402
 
 
 # 2026-10-24 11:56 那轮真实产出的 3 条提案（原文照抄）
@@ -119,6 +120,57 @@ class TestDoneItems(unittest.TestCase):
         items = evolve.done_items(journal)
         self.assertEqual(len(items), 1)
         self.assertIn("IC Monitor", items[0])
+
+
+class TestNoProposalNotice(unittest.TestCase):
+    """没有提案时也要推一条通知（用户 2026-11-02：「无论有没有值得生成的改动，
+    是不是至少给推个卡片通知」—— 否则连着几天安静，分不清是没问题还是挂了）。"""
+
+    EV = {
+        "journal": [{}, {}, {}],
+        "recent_qa": [{}, {}],
+        "handled_proposals": ["- [rejected] 示例"],
+    }
+
+    def test_notice_reports_evidence_counts(self):
+        with mock.patch("tools.dingtalk_push.push_markdown",
+                        return_value=True) as push:
+            ok = evolve.notify_no_proposal(self.EV, model="MiniMax-M3.1-Flash",
+                                           repushed=1)
+        self.assertTrue(ok)
+        text = push.call_args.args[0]
+        self.assertIn("交互流水 3 条", text)
+        self.assertIn("问答存档 2 条", text)
+        self.assertIn("重推了 1 张", text)
+        self.assertIn("没有新提案", text)
+
+    def test_dry_run_never_pushes(self):
+        with mock.patch("tools.dingtalk_push.push_markdown") as push:
+            ok = evolve.notify_no_proposal(self.EV, dry_run=True)
+        self.assertFalse(ok)
+        push.assert_not_called()
+
+
+class TestJournalTurnEvidence(unittest.TestCase):
+    """对话轮次写进 journal 后，必须真的出现在提案器的证据里（A 方案闭环）。"""
+
+    def test_qa_turn_reaches_prompt(self):
+        ev = {
+            "journal": [{
+                "ts": "2026-11-02T14:00:00", "kind": "qa_turn",
+                "summary": "为什么 evolve 没跑",
+                "fields": {"answer": "它跑了，0 条提案；已补对话证据源"},
+            }],
+            "rejected_proposals": [],
+            "handled_proposals": [],
+            "done_items": [],
+            "memory_index_global": "（空）",
+            "memory_index_project": "（空）",
+            "recent_qa": [],
+        }
+        prompt = evolve.build_prompt(ev)
+        self.assertIn("为什么 evolve 没跑", prompt)
+        self.assertIn("已补对话证据源", prompt)
 
 
 if __name__ == "__main__":

@@ -50,7 +50,7 @@ tools/
 ## 三、跑起来是什么样
 
 ```
-[每日 08:00]  scheduler 触发 evolve 作业（跑完就退的子进程；12 小时补跑窗口 = 开机即补）
+[每日 10:00]  scheduler 触发 evolve 作业（跑完就退的子进程；10 小时补跑窗口 = 开机即补）
    │
    ├─ 读证据：journal + 记忆索引 + **已处理过的提案（驳回/暂缓/已落地）**
    │        + **近期已完成改动** + 问答存档
@@ -62,6 +62,10 @@ tools/
    │
    ├─ **管辖范围闸门**（确定性）：只放行「bot 自身架构/机制」的提案；
    │     业务域内容（IC 规则/行情阈值/别的项目的活）直接丢，记 journal 可审计
+   │
+   ├─ **失败回合优先提**（2026-11-12）：journal 里 kind=qa_error 的那些
+   │     （模型报错 / 空回复 / 超时截断 / 被中断）单独拎到证据**最前面**，
+   │     要求「每条都要能提一条机制改进提案」，evidence 必须引用它本身
    │
    ├─ 提案落 memory/proposals/<id>.json
    │
@@ -92,6 +96,29 @@ python tools/apply_proposal.py <id> --approve
 python tools/apply_proposal.py <id> --reject --note "理由"
 python tools/eval_memory.py --save    # 指标快照
 ```
+
+### 失败回合优先提（2026-11-12）
+
+**为什么**：11-12 早上主模型订阅过期 → 4 轮全 `finish=error`，用户只收到
+「（空回复）」。而当时 journal 的规则写着「（空回复）没有信息量，不记」
+→ **这次故障被证据源显式排除**，evolve 10:00 扫描时压根看不见它，
+只能提一条误引了 11-09、11-11 两条「你好」的提案（指不到真根因）。
+
+**现在的口径**（三处一起改，缺一处就白改）：
+
+| 位置 | 改了什么 |
+|---|---|
+| `tools/opencode_bridge.py::turn_journal_record` | 失败回合（`finish=error` / 只落占位符 / 被中断 / **超时截断**）**照记**，kind=`qa_error`，并带上 **finish + 模型 + 真实报错原因**（不是症状） |
+| `tools/evolve.py::collect_evidence` | `qa_error` 的回合用**更大的窗口**（300 条 vs 主流水 80 条）单独收集 → `failed_turns` |
+| `tools/evolve.py::build_prompt` | `failed_turns` 放到证据**最前面**，带「最高优先级」标注；主流水里也逐条标 `**[失败回合]**` |
+| `tools/evolve.py::SYSTEM_PROMPT` | 加硬规则：失败回合**每条都要能提一条机制改进提案**，evidence **必须引用它本身**，**绝不允许**拿别的正常对话顶替 |
+| `tools/evolve.py::BOT_MARKERS` | 补「模型 / 兜底 / 空回复 / 报错 / 截断 / 订阅 / 额度 / 失败回合」——不然这类提案会被范围闸门当「跟 bot 无关」丢掉 |
+| `tools/evolve.py::notify_no_proposal` | 0 提案但**有失败回合**时，通知里明说「素材里有 N 条失败回合，没提提案」 |
+
+**已补的历史**：11-12 早上那 4 轮（08:49:59 / 08:50:14 / 08:50:34 / 09:00:22）
+已按 opencode 会话里的真实报错补进 journal（kind=`qa_error`，模型
+`deepseek-v4.1-flash`，原因「does not have a valid AgentPlan subscription」），
+所以**明天的 10:00 扫描就能看见今天早上的真故障**。
 
 ## 四、记忆的写入闸门
 
