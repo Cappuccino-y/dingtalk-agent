@@ -205,6 +205,7 @@ class Slot:
     intraday_section: bool         # 终稿是否要「盘中异动」区
     stocks_section: bool           # 终稿是否要「个股重大利好」区
     window_mode: str = "hours"     # hours | prev_close | since_last
+    pick_full_window: bool = False  # 挑选时限是否用满「到投递时刻」的全部余量
 
 
 SLOTS: dict[str, Slot] = {
@@ -233,6 +234,9 @@ SLOTS: dict[str, Slot] = {
         # 上午盘中 09:30~11:30 + 午间 11:30~12:55（收盘后 → 下午开盘前），
         # 两段在终稿里分开摆。
         window_mode="since_last",
+        # 午间这一轮**没有配额冲突**（IC 监控在早上），所以挑选时限用满
+        # 「到 12:48」的全部余量 —— API 慢的时候不会半路降级成兜底稿。
+        pick_full_window=True,
     ),
 }
 
@@ -692,10 +696,16 @@ def _llm_client():
     return OpenAICompatibleClient(model=model, api_key=key, base_url=base)
 
 
-def _chat(client, system: str, user: str, timeout: int = 180) -> str:
-    """调一次模型；超时/失败重试一次，仍失败就抛出去让上层兜底。"""
+def _chat(client, system: str, user: str, timeout: int = 180,
+          retries: int = 2) -> str:
+    """调一次模型；超时/失败重试，仍失败就抛出去让上层兜底。
+
+    `retries` 是**总尝试次数**。终稿那一轮要多试几次：服务端排队抖动
+    会让单次请求直接 `Request timed out`（2026-11-12 22:32 实测连挂 3 次），
+    一次失败就降级成「兜底稿」太浪费前面的挑选结果。
+    """
     last = None
-    for attempt in (1, 2):
+    for attempt in range(1, max(1, retries) + 1):
         try:
             resp = client.client.chat.completions.create(
                 model=client.model,
@@ -707,8 +717,8 @@ def _chat(client, system: str, user: str, timeout: int = 180) -> str:
             return (resp.choices[0].message.content or "").strip()
         except Exception as e:  # noqa: BLE001
             last = e
-            log.warning("LLM 调用失败（第 %d 次）：%s", attempt, e)
-            if attempt == 1:
+            log.warning("LLM 调用失败（第 %d/%d 次）：%s", attempt, retries, e)
+            if attempt < retries:
                 time.sleep(3)
     raise last
 
@@ -885,7 +895,7 @@ def llm_digest(client, items: list[dict], stats: dict, hours: int,
     listing = "\n".join(_line(i + 1, it) for i, it in enumerate(items))
     user = (f"以下是今天（近 {hours} 小时）各财经快讯源的候选条目：\n\n{listing}\n\n"
             f"请按系统要求写「产业要闻{slot.label}」的消息面部分。")
-    body = _chat(client, _digest_system(slot), user, timeout=240)
+    body = _chat(client, _digest_system(slot), user, timeout=180, retries=3)
     return body.strip()
 
 
@@ -1521,7 +1531,11 @@ def main() -> int:
         if handoff <= now0:
             handoff += timedelta(days=1)        # 已经过了 → 顺延到明天
         hard = int((handoff - now0).total_seconds()) - slot.pick_margin_s
-        picked = llm_pick(client, candidates, hard_limit_s=max(60, hard), slot=slot)
+        # 午间版把「到投递时刻」的余量用满（没有配额冲突，慢一点也等得起）；
+        # 早间维持「固定时限 + 批数放大」，因为 08:50 要给 IC 监控让配额。
+        deadline = max(60, hard) if slot.pick_full_window else None
+        picked = llm_pick(client, candidates, deadline_s=deadline,
+                          hard_limit_s=max(60, hard), slot=slot)
         log.info("模型挑出 %d 条进入终稿", len(picked))
         if picked:
             body = llm_digest(client, _spread(picked, 80), stats, hours, slot)
