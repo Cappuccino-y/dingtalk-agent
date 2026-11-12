@@ -1,0 +1,20 @@
+{
+  "type": "memory",
+  "title": "查询作业清单时必须以实际落盘注册表为准",
+  "scope": "project:dingtalk-agent",
+  "category": "gotcha",
+  "confidence": "high",
+  "body": "触发条件: 用户询问当前有哪些 job、作业数量或排程，且注册表或配置可能已经变更。\n动作: 每次重新读取实际落盘的作业注册表并据此枚举，明确报告相对此前清单的新增、移除或变更项；不得沿用上一轮对话中的静态清单或直接报告过时数量。\n适用范围: dingtalk-agent 的作业盘点、状态查询及重启后核验。",
+  "evidence": "“你现在有哪些 job”；“你现在再看一下你的实际 job 的落盘 看下有无新增 job”",
+  "supersedes": "",
+  "risk": "磁盘注册表与调度器进程可能短暂不同步；查询结果应标明核验时点，避免把瞬时差异误报为配置异常。",
+  "expected_gain": "避免作业数量和清单与实际注册状态不一致，确保用户查询到当前真实排程。",
+  "source": "evolve",
+  "proposed_by": "MiniMax-M3.1-Flash",
+  "id": "prop_20261112-100149_1876",
+  "created_at": "2026-11-12T02:01:49Z",
+  "status": "approved",
+  "card_pushed_ts": 1794448911.017373,
+  "card_pushed_at": "2026-11-12T02:01:51Z",
+  "decided_at": "2026-11-12T03:56:25Z"
+}

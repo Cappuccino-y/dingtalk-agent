@@ -202,3 +202,20 @@ source.agentIds: evolve, user-approved
 动作: 采用与协同重启对称的协同关机机制：停止接收新任务，排空在飞回合，向钉钉推送即将停机或已离线状态；停机应支持撤销，并设置 Windows 倒计时兜底，避免进程无提示退出。
 适用范围: dingtalk-agent 的停机、重启衔接及网络离线状态切换。
 
+---
+memoryId: mem_35a8bff8_55785
+timestamp: 2026-11-12T03:56:25Z
+scope: project:dingtalk-agent
+category: gotcha
+title: 查询作业清单时必须以实际落盘注册表为准
+tags: [evolve]
+confidence: high
+trust: self
+source.messageIds: proposal:prop_20261112-100149_1876
+source.agentIds: evolve, user-approved
+---
+
+触发条件: 用户询问当前有哪些 job、作业数量或排程，且注册表或配置可能已经变更。
+动作: 每次重新读取实际落盘的作业注册表并据此枚举，明确报告相对此前清单的新增、移除或变更项；不得沿用上一轮对话中的静态清单或直接报告过时数量。
+适用范围: dingtalk-agent 的作业盘点、状态查询及重启后核验。
+
