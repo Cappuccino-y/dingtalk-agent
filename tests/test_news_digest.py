@@ -182,8 +182,8 @@ class TestMarkdownCoverage(unittest.TestCase):
 
     def test_no_coverage_param_keeps_old_shape(self):
         md = nd.build_markdown("正文", {"东财": 10}, 8, 12)
-        self.assertIn("扫了近 12 小时", md)
-        self.assertNotIn("覆盖", md)
+        self.assertIn("近 12 小时", md)
+        self.assertNotIn("覆盖不全", md)
 
 
 class TestRenderItems(unittest.TestCase):
@@ -195,7 +195,8 @@ class TestRenderItems(unittest.TestCase):
         out = nd._render_items(body)
         # 一条 = 一段：不再有裸换行把「事件」和「影响」切开
         self.assertNotIn("\n", out)
-        self.assertIn("**油气/油运**", out)
+        self.assertIn("油气/油运", out)
+        self.assertNotIn("**", out)          # 强调语法清掉（钉钉不渲染）
         self.assertIn("→ 影响：", out)
 
     def test_multiple_items_separated_by_blank_line(self):
@@ -203,8 +204,8 @@ class TestRenderItems(unittest.TestCase):
                 "**B**｜事件乙\n→ 影响：乙")
         out = nd._render_items(body)
         self.assertEqual(len(out.split("\n\n")), 2)
-        self.assertTrue(out.startswith("**A**"))
-        self.assertIn("**B**", out)
+        self.assertTrue(out.startswith("A"))
+        self.assertIn("B", out)
 
     def test_model_blank_line_between_item_lines_still_merges(self):
         """模型偶尔在板块行和影响行之间插空行 —— 也必须归并成一条。"""
@@ -548,8 +549,9 @@ class TestDingtalkLayout(unittest.TestCase):
         md = nd.build_markdown(body, {"东财": 251, "新浪": 615}, 866, 12)
         norm = self._norm(md)
         # 板块块之间是空行（= 渲染时真换行）
-        self.assertIn("**油气/油运**", norm)
-        self.assertIn("**AI算力硬件**", norm)
+        self.assertIn("油气/油运", norm)
+        self.assertIn("AI算力硬件", norm)
+        self.assertNotIn("**", norm)      # 钉钉不渲染 ** → 正文里不能留
         self.assertGreaterEqual(norm.count("\n\n"), 3)
 
 
@@ -576,22 +578,90 @@ class TestSlotsAndNoonWindow(unittest.TestCase):
         self.assertIs(nd._auto_slot(datetime(2026, 11, 12, 8, 40)), nd.SLOTS["morning"])
         self.assertIs(nd._auto_slot(datetime(2026, 11, 12, 12, 30)), nd.SLOTS["noon"])
 
+    def test_morning_window_starts_at_prev_trading_close(self):
+        """早报窗口 = 上一个交易日 15:00 → 今早播报（用户 2026-11-12 的口径）。"""
+        self.assertEqual(nd.SLOTS["morning"].window_mode, "prev_close")
+        with mock.patch.object(nd, "_trade_dates", lambda: [
+            datetime(2026, 11, 10).date(), datetime(2026, 11, 11).date(),
+            datetime(2026, 11, 12).date(), datetime(2026, 11, 13).date()]):
+            cut = nd._slot_cutoff(nd.SLOTS["morning"], {},
+                                  datetime(2026, 11, 12, 8, 35))
+        self.assertEqual(cut, datetime(2026, 11, 11, 15, 0))
+
+    def test_monday_window_starts_at_friday_close(self):
+        """周一 → 上周五 15:00（周末的消息一次补齐）。"""
+        with mock.patch.object(nd, "_trade_dates", lambda: [
+            datetime(2026, 11, 6).date(), datetime(2026, 11, 9).date(),
+            datetime(2026, 11, 10).date(), datetime(2026, 11, 11).date(),
+            datetime(2026, 11, 12).date(), datetime(2026, 11, 13).date()]):
+            cut = nd._slot_cutoff(nd.SLOTS["morning"], {},
+                                  datetime(2026, 11, 16, 8, 35))
+        self.assertEqual(cut, datetime(2026, 11, 13, 15, 0))
+
     def test_noon_window_starts_at_morning_push(self):
         """午间版窗口 = 距早报推送至今（覆盖上午盘中，不重复早报）。"""
         state = {"slots": {"morning": {"at": "2026-11-12T08:50:57"}}}
         now = datetime(2026, 11, 12, 12, 20)
-        hours = nd._default_hours(nd.SLOTS["noon"], state, now)
-        cutoff = now - timedelta(hours=hours)
-        self.assertLess(cutoff, datetime(2026, 11, 12, 8, 50))   # 盖住早报推送时刻
-        self.assertGreater(cutoff, datetime(2026, 11, 12, 7, 0))   # 不会回溯太远
+        cut = nd._slot_cutoff(nd.SLOTS["noon"], state, now)
+        self.assertEqual(cut, datetime(2026, 11, 12, 8, 50, 57))
 
     def test_noon_window_fallback_when_no_morning_push(self):
-        hours = nd._default_hours(nd.SLOTS["noon"], {}, datetime(2026, 11, 12, 12, 20))
-        self.assertEqual(hours, nd.NOON_DEFAULT_HOURS)
+        now = datetime(2026, 11, 12, 12, 20)
+        cut = nd._slot_cutoff(nd.SLOTS["noon"], {}, now)
+        self.assertEqual(cut, datetime(2026, 11, 12, 8, 35))
 
-    def test_morning_window_is_25h(self):
-        hours = nd._default_hours(nd.SLOTS["morning"], {}, datetime(2026, 11, 12, 8, 40))
-        self.assertEqual(hours, nd.DEFAULT_HOURS)
+    def test_prev_trading_close_fallback_skips_weekend(self):
+        """日历拿不到时退回「跳过周末」规则（2026-11-16 周一 → 11-13 周五）。"""
+        with mock.patch.object(nd, "_trade_dates", lambda: []):
+            cut = nd._prev_trading_close(datetime(2026, 11, 16, 8, 35))
+        self.assertEqual(cut, datetime(2026, 11, 13, 15, 0))
+
+
+class TestNoonTwoBlocks(unittest.TestCase):
+    """午间版分两段：上午盘中（09:30~11:30）/ 午间（11:30~12:55）。"""
+
+    BODY = (
+        "主线：AI 算力与存储涨价共振（东财·11:32）\n\n"
+        "上午盘中：\n"
+        "1. **半导体/存储**：存储企业告知涨价意向（东财·10:36）\n"
+        "→ 影响：涨价传导\n"
+        "2. **AI算力**：百度发布1024卡全光超节点（东财·11:51）\n"
+        "→ 影响：国产算力推进\n\n"
+        "盘中异动：\n"
+        "- 军工板块：航天南湖涨超10%（东财·11:23）\n\n"
+        "午间要闻：\n"
+        "1. **商业航天**：卫星制造商通过香港IPO募资7.5亿港元（新浪·12:23）\n"
+        "→ 影响：融资通道拓宽\n"
+        "2. **卫星互联网**：某公司公布地面站建设进展（新浪·12:31）\n"
+        "→ 影响：地面段需求提升\n\n"
+        "个股重大利好：\n"
+        "1. **国轩高科（002074）**：2GWh全固态量产线启动（东财·11:56）\n"
+        "→ 影响：产业化提速\n"
+    )
+
+    def test_section_titles_carry_time_ranges(self):
+        out = nd._render_sections(self.BODY, nd.SLOTS["noon"])
+        self.assertIn("【上午盘中 09:30~11:30】", out)
+        self.assertIn("【午间要闻 11:30~12:55】", out)
+        self.assertIn("【盘中异动】", out)
+        self.assertIn("【个股重大利好】", out)
+
+    def test_items_reassigned_by_timestamp(self):
+        """模型把 11:05 的公告写进「午间要闻」时，本地按时间戳纠正回上午盘中。"""
+        body = self.BODY.replace(
+            "1. **商业航天**：卫星制造商通过香港IPO募资7.5亿港元（新浪·12:23）",
+            "1. **商业航天**：卫星制造商通过香港IPO募资7.5亿港元（新浪·11:05）")
+        out = nd._render_sections(body, nd.SLOTS["noon"])
+        early = out.split("【上午盘中 09:30~11:30】")[1].split("【盘中异动】")[0]
+        late = out.split("【午间要闻 11:30~12:55】")[1].split("【个股重大利好】")[0]
+        self.assertIn("商业航天", early)
+        self.assertNotIn("商业航天", late)
+
+    def test_no_markdown_emphasis_by_default(self):
+        """用户 2026-11-12 反馈：钉钉这条通道把 ** 显示成字面量 → 不用强调语法。"""
+        self.assertFalse(nd.MD_BOLD)
+        out = nd._render_sections(self.BODY, nd.SLOTS["noon"])
+        self.assertNotIn("**", out)
 
 
 class TestWaitUntilDelivery(unittest.TestCase):
@@ -658,37 +728,43 @@ class TestRenderSections(unittest.TestCase):
 
     def test_sections_are_split(self):
         out = nd._render_sections(self.BODY, nd.SLOTS["noon"])
-        self.assertIn("**主线**｜算力芯片与存储涨价共振", out)
-        self.assertIn("**板块要闻**", out)
-        self.assertIn("**个股重大利好**", out)
-        self.assertIn("**盘中异动**", out)
+        self.assertIn("主线｜算力芯片与存储涨价共振", out)
+        self.assertIn("【板块要闻】", out)
+        self.assertIn("【个股重大利好】", out)
+        self.assertIn("【盘中异动】", out)
 
     def test_items_are_numbered_and_own_paragraph(self):
         out = nd._render_sections(self.BODY, nd.SLOTS["noon"])
-        self.assertIn("**1 · 半导体/存储**｜头部存储企业告知涨价意向", out)
-        self.assertIn("**2 · AI算力**｜百度发布1024卡全光超节点", out)
+        self.assertIn("1 · 半导体/存储｜头部存储企业告知涨价意向", out)
+        self.assertIn("2 · AI算力｜百度发布1024卡全光超节点", out)
         # 事件与影响是**两段**（中间空行）—— 钉钉才渲染得出换行
-        self.assertIn("**1 · 半导体/存储**｜头部存储企业告知涨价意向，费城半导体指数涨近6%（东财·11:36）\n\n→ 影响：涨价与扩产同时兑现",
+        self.assertIn("1 · 半导体/存储｜头部存储企业告知涨价意向，费城半导体指数涨近6%（东财·11:36）\n\n→ 影响：涨价与扩产同时兑现",
                       out)
+
+    def test_no_markdown_emphasis(self):
+        """`**` 在钉钉这条通道会显示成字面量 → 渲染层不能留 `**`。"""
+        out = nd._render_sections(self.BODY, nd.SLOTS["noon"])
+        self.assertNotIn("**", out)
 
     def test_intraday_bullets_stay_one_list(self):
         """列表项之间不能插空行（会被拆成多个列表 / 重新编号）。"""
         out = nd._render_sections(self.BODY, nd.SLOTS["noon"])
-        block = out.split("**盘中异动**")[1]
+        block = out.split("【盘中异动】")[1]
         self.assertIn("- 光伏：协鑫集成涨停、亚玛顿2连板（新浪·10:34）\n- 创新药：万邦医药涨超10%（新浪·11:04）",
                       block)
 
     def test_stock_names_only_in_stock_section(self):
         out = nd._render_sections(self.BODY, nd.SLOTS["noon"])
-        sector_part = out.split("**板块要闻**")[1].split("**个股重大利好**")[0]
+        sector_part = out.split("【板块要闻】")[1].split("【个股重大利好】")[0]
         self.assertNotIn("国轩高科", sector_part)
 
     def test_plain_body_falls_back_to_old_layout(self):
         body = ("**油气/油运**｜美方称持续执行霍尔木兹海峡海上封锁（富途/新浪·11月12日02:12）\n"
                 "→ 影响：若冲突外溢并扰动通航")
         out = nd._render_sections(body, nd.SLOTS["morning"])
-        self.assertIn("**油气/油运**", out)
-        self.assertNotIn("\n", out)     # 老口径：事件+影响并成一段
+        self.assertIn("油气/油运", out)
+        self.assertNotIn("**", out)          # 强调语法一律清掉
+        self.assertNotIn("\n", out)          # 老口径：事件+影响并成一段
 
     def test_empty_body(self):
         self.assertEqual(nd._render_sections("", nd.SLOTS["noon"]), "")
@@ -703,7 +779,7 @@ class TestBuildMarkdownWindow(unittest.TestCase):
                                window=(datetime(2026, 11, 12, 8, 50),
                                        datetime(2026, 11, 12, 12, 55)))
         self.assertIn("11-12 08:50~11-12 12:55", md)
-        self.assertIn("扫了近 4 小时", md)
+        self.assertIn("近 4 小时", md)
 
     def test_disclaimer_mentions_stocks_are_not_advice(self):
         md = nd.build_markdown("主线：x", {"东财": 10}, 8, 4, slot=nd.SLOTS["noon"])
