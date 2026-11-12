@@ -1328,6 +1328,41 @@ def journal_turn(conv, question, answer, session_id="", kind="qa_turn"):
         logger.warning("journal 写入失败：%s", e)
 
 
+def turn_journal_record(final_text: str, finish: str = "", model: str = "",
+                        detail: str = "", interrupted: bool = False
+                        ) -> tuple[str, str]:
+    """决定这一轮要不要写进 journal（evolve 的证据源），写成什么。
+
+    返回 (answer, kind)；answer 为空 = 不记。
+
+    2026-11-12 真机事故（evolve 为什么看不见早上的异常）：
+        早上 09:00 主模型订阅过期 → 这一轮只落了 5 个字「（空回复）」，
+        而当时的规则是「（空回复）这种没有信息量的不记，免得污染证据」
+        → **失败回合被证据源显式排除**。结果 journal.md 里 11-12 上午
+        （00:00–09:59）一条记录都没有，evolve 10:01 扫描时根本看不见这次失败。
+
+    现在：**失败回合照记**，而且必须带上**真实原因**（模型 + 报错摘要），
+    否则下一轮 evolve 看到的还是「只有症状、没有原因」。
+    正常回合原样记（kind=qa_turn）；失败/被中断记成 kind=qa_error。
+    """
+    txt = (final_text or "").strip()
+    failed = (finish == "error") or (not txt) or (txt == "（空回复）")
+    if interrupted:
+        failed = True
+    if not failed:
+        return txt, "qa_turn"
+    why = (detail or "").strip() or "（无错误详情）"
+    bits = []
+    if interrupted:
+        bits.append("这一轮被中断")
+    else:
+        bits.append(f"这一轮失败：finish={finish or 'unknown'}")
+    if model:
+        bits.append(f"模型 {model}")
+    bits.append(f"原因：{why[:300]}")
+    return "；".join(bits), "qa_error"
+
+
 # 钉钉回传的决定值正常是 option.value（approve/reject/defer），
 # 但老卡、中文标签、手改过的模板都可能塞别的写法 —— 认不出来就返回 ""，**绝不猜**。
 _DECISION_ALIASES = {
@@ -3963,9 +3998,21 @@ class AgentTurn:
                     logger.warning("卡片问答归档失败：%s", e)
 
             # 每一轮都往 journal 留一条证据（evolve 的输入，2026-11-02 起）。
-            # 「（空回复）」这种没有信息量的不记，免得污染证据。
-            if final_text and final_text.strip() not in ("（空回复）",):
-                journal_turn(msg.conversation_id, text, final_text, session_id=sid)
+            #
+            # 2026-11-12：早上 09:00 主模型订阅过期 → 这一轮只落了 5 个字
+            # 「（空回复）」，而老规则是「（空回复）不记，免得污染证据」
+            # → **失败回合被证据源显式排除**，evolve 10:00 扫描时
+            # journal 里 11-12 上午零条记录，这次异常它根本看不见。
+            # 现在失败回合照记（kind=qa_error），并带上模型 + 真实报错原因。
+            jrec, jkind = turn_journal_record(
+                final_text, finish=run.get("finish") or "",
+                model=run.get("model") or "",
+                detail=(error_summary(run.get("message"))
+                        if run.get("message") else ""),
+                interrupted=interrupted)
+            if jrec:
+                journal_turn(msg.conversation_id, text, jrec,
+                             session_id=sid, kind=jkind)
 
             finish = run.get("finish") or ""
             model_id = run.get("model") or ""
