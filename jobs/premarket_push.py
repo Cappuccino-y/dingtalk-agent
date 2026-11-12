@@ -171,8 +171,8 @@ def _ask_agent(trading: bool = True) -> str:
     不会和你在钉钉里手动聊天互相污染。
     """
     from tools.opencode_bridge import (
-        DEFAULT_MODEL, FALLBACK_MODEL, OpenCodeService, apply_instructions,
-        is_quota_error,
+        DEFAULT_MODEL, OpenCodeService, apply_instructions,
+        is_quota_error, resolve_fallback_candidates,
     )
 
     oc = OpenCodeService()
@@ -233,19 +233,40 @@ def _ask_agent(trading: bool = True) -> str:
         return oc.last_assistant(sid) or {}
 
     msg = _run_once()
-    # 主模型额度耗尽 → 自动切兜底模型（和钉钉聊天同一套逻辑）
+    # 主模型额度耗尽 → 自动切兜底模型（和钉钉聊天同一套逻辑：候选链，
+    # 跨 provider 优先 —— 同一个 provider 共用同一份订阅/配额池，
+    # 主模型满了同 provider 的兄弟模型大概率也满）。
     if msg and is_quota_error(msg):
-        log.warning("主模型额度/限流耗尽，切换兜底模型 %s",
-                    FALLBACK_MODEL["id"])
-        try:
-            oc.switch_model(sid, FALLBACK_MODEL["providerID"],
-                            FALLBACK_MODEL["id"])
-        except Exception as exc:  # noqa: BLE001
-            log.error("切换兜底模型失败: %s", exc)
+        failed_pair = ((msg.get("model") or {}).get("providerID") or "",
+                       (msg.get("model") or {}).get("id") or "")
+        cands, cands_err = resolve_fallback_candidates(oc, failed_pair)
+        if not cands:
+            log.error("没有可用的兜底模型：%s", cands_err)
             return ""
-        msg = _run_once() or {}
-        if is_quota_error(msg):
-            log.error("兜底模型也失败，放弃本次盘前报告")
+        tried = set()
+        for fb in cands:
+            tried.add((fb["providerID"], fb["id"]))
+            log.warning("主模型额度/限流耗尽，切换兜底模型 %s/%s",
+                        fb["providerID"], fb["id"])
+            try:
+                oc.switch_model(sid, fb["providerID"], fb["id"])
+            except Exception as exc:  # noqa: BLE001
+                log.error("切换兜底模型失败: %s", exc)
+                continue
+            cur = oc.session_model(sid) or {}
+            if (cur.get("providerID") != fb["providerID"]
+                    or cur.get("id") != fb["id"]):
+                log.error("切到 %s/%s 没生效（现在还是 %s/%s）",
+                          fb["providerID"], fb["id"],
+                          cur.get("providerID"), cur.get("id"))
+                continue
+            msg = _run_once() or {}
+            if is_quota_error(msg):
+                log.warning("兜底模型 %s 也不可用，继续试下一个", fb["id"])
+                continue
+            break
+        else:
+            log.error("所有兜底模型都失败，放弃本次盘前报告")
             return ""
 
     log.info("agent 完成 finish=%s model=%s", msg.get("finish"),

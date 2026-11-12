@@ -51,32 +51,53 @@ except Exception:  # noqa: BLE001
     except Exception:  # noqa: BLE001
         card_v2 = None
 
+# 兜底模型候选链（纯逻辑模块，单独拆出来是为了能被单测直接钉住规则）。
+try:
+    from tools import model_fallback as model_fallback
+except Exception:  # noqa: BLE001
+    try:
+        import model_fallback as model_fallback
+    except Exception:  # noqa: BLE001
+        model_fallback = None
+
 logger = logging.getLogger("opencode_bridge")
 
 SERVICE_JSON = os.path.expanduser(r"~\.local\state\opencode\service.json")
 
-DEFAULT_MODEL = {"providerID": "volcengine-agent-plan", "id": "deepseek-v4.1-flash"}
-# 兜底模型：火山 Agent Plan 额度耗尽 / 报错时自动切到 MiniMax 继续回复。
-# providerID / model id 已对着本机 /api/model 接口核实过。
-# ⚠️ model id 必须是 /api/model 清单里**真实存在**的那一个。
-# 切换接口不校验 id：不存在的 id 也返回 204，看起来"切成功了"，
-# 但下一轮压根不会产生任何 assistant 消息（会话直接 idle），
-# 用户只拿到一张空卡片 + "已切到 XXX" 的假提示。
-# （2026-10-22 踩过：这里写的是 MiniMax-M3.1-Flash-Preview，
-#  本机只有 MiniMax-M3.1-Flash 和 MiniMax-M3，Preview 版不存在。）
-FALLBACK_MODEL = {"providerID": "minimax-cn-coding-plan",
-                  "id": "MiniMax-M3.1-Flash"}
+DEFAULT_MODEL = {"providerID": "minimax-cn-coding-plan", "id": "MiniMax-M3.1-Flash"}
+# 2026-11-12：火山 Agent Plan 订阅到期（服务端报 "does not have a valid
+# AgentPlan subscription"），所有 volcengine-agent-plan/* 模型一律秒失败、
+# 用户只收到「（空回复）」。在续费之前默认走 MiniMax；续费后想换回来，
+# 把 DEFAULT_MODEL 改回：
+#   {"providerID": "volcengine-agent-plan", "id": "deepseek-v4.1-flash"}
+# 兜底模型：主模型额度/订阅耗尽时自动切过去继续回复。
+# 2026-11-12 重构：兜底不再是**单个**模型，而是一条**候选链**
+# （tools/model_fallback.py）——原因见那个模块的注释：
+#   ① 同一个 provider 共用同一份订阅/配额池 → 同 provider 的兄弟模型
+#      在「额度耗尽」时大概率一起挂，必须能跨 provider 兜底；
+#   ② 原来的守卫 `cur_pid != FALLBACK_MODEL["providerID"]` 只比 providerID，
+#      默认模型与兜底模型同属 minimax-cn-coding-plan 时**恒为 False**，
+#      兜底分支根本进不去（11-12 事故的直接原因）。
+# ⚠️ 每个 id 都必须是 /api/model 清单里**真实存在**的那一个：
+#   切换接口不校验 id，不存在的 id 也返回 204「切成功了」，
+#   但下一轮压根不产生 assistant 消息 → 用户只拿到一张空卡片。
+FALLBACK_MODEL = (dict(model_fallback.FALLBACK_MODEL)
+                  if model_fallback else
+                  {"providerID": "minimax2", "id": "MiniMax-M3"})
+FALLBACK_CHAIN = model_fallback.FALLBACK_CHAIN if model_fallback else ()
 
 # /model 提问卡里给出的可选模型（手机端点选，避免手打 id 打错）。
 # key = "providerID|modelID"：同一个模型 id 可能挂在多个 provider 下
 # （例如 minimax-m3），只写 id 会有歧义。
+# 2026-11-12：火山 Agent Plan 订阅到期 → volcengine-agent-plan/* 全部秒失败，
+#   把它留在候选里等于给用户发一张必挂的卡。改成**本机实测能出字**的三个。
 MODEL_CHOICES = [
     {"key": "minimax-cn-coding-plan|MiniMax-M3.1-Flash",
      "label": "MiniMax 3.1", "id": "MiniMax-M3.1-Flash"},
-    {"key": "volcengine-agent-plan|deepseek-v4.1-flash",
-     "label": "DeepSeek 4.1 Flash", "id": "deepseek-v4.1-flash"},
-    {"key": "volcengine-agent-plan|glm-5.3-flash",
-     "label": "GLM 5.3 Flash", "id": "glm-5.3-flash"},
+    {"key": "minimax2|MiniMax-M3",
+     "label": "MiniMax M3（备用 key）", "id": "MiniMax-M3"},
+    {"key": "deepseek|deepseek-v4-pro",
+     "label": "DeepSeek V4 Pro", "id": "deepseek-v4-pro"},
 ]
 # 提问卡等用户点选的最长时间（秒）；超时就把卡片收成「已失效」，不干等。
 MODEL_CHOICE_TIMEOUT = 120
@@ -89,6 +110,12 @@ _QUOTA_ERROR_PAT = (
     "quota", "insufficient", "rate limit", "ratelimit", "too many requests",
     "exhausted", "balance", "billing", "arrears", "欠费", "额度", "配额", "限流",
     "余额不足", "out of credit", "no credit", "overdue",
+    # 2026-11-12：火山 Agent Plan 到期时的原文是
+    # "Your account (xxx) does not have a valid AgentPlan subscription,
+    #  or your subscription has expired." —— 一个 quota 类关键词都没有，
+    # 于是自动切兜底的逻辑没触发，用户只收到「（空回复）」。
+    "subscription", "subscribe", "expired", "agentplan", "not activated",
+    "未开通", "订阅", "已过期", "到期",
 )
 
 POLL_INTERVAL = 0.6
@@ -132,6 +159,14 @@ def _env_flag(name, default=False):
 
 
 MODEL_CHOICE_TIMEOUT = _env_float("DINGTALK_MODEL_CHOICE_TIMEOUT", MODEL_CHOICE_TIMEOUT)
+
+# 本机 OpenCode 服务「控制面」调用（新建会话 / 投递消息 / 读消息）的超时。
+# 2026-11-11 事故：09:27 新建会话时服务正在刷新 provider 目录 + 连 MCP，
+# 请求在服务端挂了 20s 以上还没返回，桥接层写死 30s 就直接 ReadTimeout，
+# 未重试、未兜底，用户只收到一串 urllib3 原文。
+# 这些都是本机接口，慢只可能是服务在建实例，不是模型在思考——模型长跑由
+# wait_idle（WAIT_TIMEOUT=1800s）负责，别在这里抢戏。
+CONTROL_TIMEOUT = _env_int("OC_CONTROL_TIMEOUT", 120)
 
 
 # 事件流（SSE /api/event）重连退避（秒）。
@@ -483,7 +518,7 @@ TOOL_LABELS = {
 class OpenCodeService:
     """本机 OpenCode 后台服务的瘦客户端。"""
 
-    def __init__(self, base_url=None, password=None, timeout=30):
+    def __init__(self, base_url=None, password=None, timeout=CONTROL_TIMEOUT):
         if not base_url:
             base_url, password = self.discover()
         self.base = base_url.rstrip("/")
@@ -515,10 +550,23 @@ class OpenCodeService:
             body["agent"] = agent
         if model:
             body["model"] = model
-        r = requests.post(self._url("/api/session"), headers=self.headers,
-                          json=body, timeout=self.timeout)
-        r.raise_for_status()
-        return r.json()["data"]
+        # 超时/断连各重试一次：建会话是幂等的「又开一个新会话」，
+        # 最坏结果是多出一个没人用的空会话，比整轮失败强。
+        last_exc = None
+        for attempt in (1, 2):
+            try:
+                r = requests.post(self._url("/api/session"), headers=self.headers,
+                                  json=body, timeout=self.timeout)
+                r.raise_for_status()
+                return r.json()["data"]
+            except (requests.exceptions.Timeout,
+                    requests.exceptions.ConnectionError) as exc:
+                last_exc = exc
+                if attempt == 1:
+                    logger.warning("新建会话超时/断连（timeout=%ss），3 秒后重试一次：%s",
+                                   self.timeout, exc)
+                    time.sleep(3.0)
+        raise last_exc
 
     def prompt(self, session_id, text, files=None):
         """投递一条用户消息（异步）。files: [{"uri": "file:///...", "name": "x.png"}]"""
@@ -1254,6 +1302,32 @@ def _journal_feedback(kind, conv, session_id, extra=""):
         logger.warning("journal 写入失败：%s", e)
 
 
+def journal_turn(conv, question, answer, session_id="", kind="qa_turn"):
+    """把每一轮的「问题 + 回答摘要」写进 journal —— evolve 的证据源。
+
+    2026-11-02：evolve 连着几天 0 提案，查出来是**证据断供**：journal 里只有
+    系统事件和 retry/stop 这种负反馈，普通对话一个字都没进去（最后一条真实
+    交互停在 10-29），记忆索引停在 10-26 —— 提案器看不到你最近在抱怨什么。
+
+    只存摘要（问题 200 字 / 回答 600 字），不存全文：journal 是 append-only 的
+    纯文本，塞全文会迅速膨胀，而且提案器要的是「你在意什么」不是「原话」。
+
+    写失败绝不影响主流程（和 `_journal_feedback` 同一原则）。
+    """
+    try:
+        from tools import memory_store as ms
+        q = " ".join((question or "").split())
+        a = " ".join((answer or "").split())
+        if not q:
+            return
+        ms.append_journal(
+            kind, q[:200],
+            conv=conv or "-", session=session_id or "-",
+            answer=(a[:600] or "-"))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("journal 写入失败：%s", e)
+
+
 # 钉钉回传的决定值正常是 option.value（approve/reject/defer），
 # 但老卡、中文标签、手改过的模板都可能塞别的写法 —— 认不出来就返回 ""，**绝不猜**。
 _DECISION_ALIASES = {
@@ -1269,6 +1343,57 @@ def _norm_decision(value) -> str:
     if not s:
         return ""
     return _DECISION_ALIASES.get(s) or _DECISION_ALIASES.get(s.lower(), "")
+
+
+# ---- 审批回调去重（2026-11-12 真机事故的补丁）----
+# 钉钉会把**同一份表单**再投一次：我们回写卡片状态（finish_ask_card 的 PUT）
+# 就会触发一次带旧表单值的回调。照单再执行一次 → 提案已归档 → 「提案不存在」，
+# 于是把一次**已经成功**的审批显示成 ❌（2026-10-26、2026-11-12 各中一次）。
+# 这里记下「哪个 question_id + 哪份答案」结算过，重复的直接忽略（不改卡片终态）。
+#
+# 窗口取 60 秒：实测重复投递在 3 秒内到达（11:56:25.699 收 → 11:56:28.722 再来一次），
+# 而用户真要「重选一次再提交」得重新点开卡片，60 秒足够区分两者。
+#
+# ⚠️ 登记后**不撤销**：连着读不懂/没选也要留着 —— 因为我们的每一次卡片回写
+# 都会再触发一次回调，撤销登记就会变成「回写 → 重复 → 再回写」的无限循环。
+_EVOLVE_SEEN_TTL = 60.0
+_EVOLVE_SEEN: dict[str, float] = {}
+_EVOLVE_SEEN_LOCK = threading.Lock()
+
+
+def _evolve_key(qid: str, answers: dict) -> str:
+    """回调指纹：question_id + 答案内容（只认答案，忽略无关字段）。"""
+    try:
+        blob = json.dumps(answers, sort_keys=True, ensure_ascii=False)
+    except Exception:  # noqa: BLE001
+        blob = repr(answers)
+    return f"{qid}|{blob}"
+
+
+def _evolve_mark_seen(key: str) -> None:
+    """登记「这份答案已结算」。"""
+    now = time.time()
+    with _EVOLVE_SEEN_LOCK:
+        for k, ts in list(_EVOLVE_SEEN.items()):
+            if now - ts > _EVOLVE_SEEN_TTL:
+                _EVOLVE_SEEN.pop(k, None)
+        _EVOLVE_SEEN[key] = now
+        if len(_EVOLVE_SEEN) > 200:          # 有界
+            for k in list(_EVOLVE_SEEN)[:100]:
+                _EVOLVE_SEEN.pop(k, None)
+
+
+def _evolve_is_repeat(key: str) -> bool:
+    """这份答案是不是刚刚已经结算过？"""
+    now = time.time()
+    with _EVOLVE_SEEN_LOCK:
+        ts = _EVOLVE_SEEN.get(key)
+        if ts is None:
+            return False
+        if now - ts > _EVOLVE_SEEN_TTL:
+            _EVOLVE_SEEN.pop(key, None)
+            return False
+        return True
 
 
 def _repush_pending_cards(pids, log=None):
@@ -1356,6 +1481,14 @@ def _handle_evolve_proposal(conv, action, params, log=None, out_track=""):
 
     answers = _cv.parse_ask_answer(params) or {}
 
+    # ---- 重复投递闸门（先登记后执行，见下方 _evolve_unmark 的回滚）----
+    # 同一份表单被再投一次 → 直接忽略，**不改卡片终态**（上次成功的状态不能被覆盖）。
+    cb_key = _evolve_key(qid, answers)
+    if _evolve_is_repeat(cb_key):
+        log.info("改进提案：重复回调（同一份表单已结算，qid=%s），忽略（不改卡片终态）", qid)
+        return True
+    _evolve_mark_seen(cb_key)
+
     def _decision_of(key):
         d = answers.get(key)
         if isinstance(d, list):
@@ -1373,6 +1506,12 @@ def _handle_evolve_proposal(conv, action, params, log=None, out_track=""):
 
     def _apply_one(target_pid, decision):
         """按决定落地一条提案。返回 (是否成功, 展示文本)。"""
+        # 提案已经结算过（重复投递）→ 不再执行，只如实说明。
+        # 不能报「提案不存在」：那会把一次成功的审批显示成 ❌（2026-11-12 真机事故）。
+        state = _ms.proposal_state(target_pid)
+        if state in ("approved", "rejected"):
+            how = "已批准落地" if state == "approved" else "已被驳回"
+            return True, "✅ 重复提交，已忽略（该提案此前%s）" % how
         if decision == "approve":
             ok, msg = _ap.approve(target_pid)
             return ok, ("✅ 已批准并落地：%s" % msg) if ok else ("❌ 批准失败：%s" % msg)
@@ -3037,6 +3176,35 @@ def process_summary(parts, elapsed=None, failed=False):
     return " · ".join(bits)
 
 
+def resolve_fallback_candidates(oc, failed=None, tried=None):
+    """列出**本机真的存在**的兜底候选（按优先级，跨 provider 优先）。
+
+    返回 (candidates list, 错误说明)。
+
+    为什么必须自己校验：切换接口**不校验 id**——不存在的模型也返回 204，
+    看起来"切成功了"，但 opencode 下一轮压根不产生任何 assistant 消息
+    （会话直接 idle），用户拿到的是一张空卡片 + "已切到 XXX"的假提示。
+    2026-10-22 就是这么翻车的：兜底 id 写成了 MiniMax-M3.1-Flash-Preview，
+    本机只有 MiniMax-M3.1-Flash。
+
+    2026-11-12：不再返回**单个**兜底，而是整条候选链（按优先级排好）：
+    同一个 provider 共用同一份订阅/配额池，「额度耗尽」时同 provider 的
+    兄弟模型大概率一起挂 → 兜底必须能跨 provider。
+    """
+    if model_fallback is None:
+        return [], "兜底候选链模块不可用"
+    try:
+        avail = oc.models()
+    except Exception as e:  # noqa: BLE001
+        return [], f"取模型清单失败（{e}）"
+    if not avail:
+        return [], "取不到本机模型清单"
+    cands = model_fallback.candidates(avail, failed, tried)
+    if not cands:
+        return [], "本机没有可用的兜底模型（候选链里的 id 都不存在）"
+    return cands, ""
+
+
 def is_quota_error(msg) -> bool:
     """判断一条 assistant 消息是否是"主模型额度/限流耗尽"这类不可用错误。
 
@@ -3097,6 +3265,28 @@ def error_summary(msg, limit=200):
         s = "（无错误详情）"
     s = re.sub(r"\s+", " ", s)
     return s[:limit] + ("…" if len(s) > limit else "")
+
+
+def turn_error_text(exc):
+    """把整轮失败的异常翻成用户能看懂的一句话。
+
+    2026-11-11 之前这里是直接 `f"{type(e).__name__}: {e}"`，于是用户的钉钉里
+    出现过 "ReadTimeout: HTTPConnectionPool(host='127.0.0.1', port=45278):
+    Read timed out. (read timeout=30)" 这种东西——既看不懂，也不知道该做什么。
+    技术细节仍然全量进日志（logger.exception），这里只负责给结论和出路。
+    """
+    if isinstance(exc, requests.exceptions.Timeout):
+        return ("⏱ 本机 OpenCode 服务响应超时（已自动重试一次，仍未返回）。\n\n"
+                "这通常是服务正在新建会话时刷新模型目录 / 连 MCP，卡了 20~40 秒。\n\n"
+                "处理：等 1 分钟再发一遍消息；一直不通就在电脑上跑 "
+                "`opencode service restart`。")
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        return ("🔌 连不上本机 OpenCode 服务（127.0.0.1）。\n\n"
+                "处理：在电脑上跑 `opencode service start`，然后重发消息。")
+    if isinstance(exc, requests.exceptions.HTTPError):
+        code = getattr(getattr(exc, "response", None), "status_code", "")
+        return f"❌ OpenCode 服务返回错误（HTTP {code}）。\n\n细节已记在日志里。"
+    return f"`{type(exc).__name__}: {exc}`"
 
 
 # ---------------------------------------------------------------- 会话映射
@@ -3345,36 +3535,6 @@ class AgentTurn:
         return out
 
     # ---- 一轮驱动（事件流 + 兜底轮询）----
-    @staticmethod
-    def _resolve_fallback(oc):
-        """挑一个**本机真的存在**的兜底模型。
-
-        返回 (model_dict | None, 错误说明)。
-
-        为什么必须自己校验：切换接口**不校验 id**——不存在的模型也返回 204，
-        看起来"切成功了"，但 opencode 下一轮压根不产生任何 assistant 消息
-        （会话直接 idle），用户拿到的是一张空卡片 + "已切到 XXX"的假提示。
-        2026-10-22 就是这么翻车的：兜底 id 写成了 MiniMax-M3.1-Flash-Preview，
-        本机只有 MiniMax-M3.1-Flash。
-        """
-        try:
-            avail = oc.models()
-        except Exception as e:  # noqa: BLE001
-            return None, f"取模型清单失败（{e}）"
-        if not avail:
-            return None, "取不到本机模型清单"
-        pairs = {(m.get("providerID"), m.get("id")) for m in avail}
-        want = (FALLBACK_MODEL["providerID"], FALLBACK_MODEL["id"])
-        if want in pairs:
-            return {"providerID": want[0], "id": want[1]}, ""
-        # 兜底 id 过期了：同 provider 下退而求其次，别直接放弃。
-        alts = sorted(i for (p, i) in pairs if p == FALLBACK_MODEL["providerID"])
-        if alts:
-            return ({"providerID": FALLBACK_MODEL["providerID"], "id": alts[0]},
-                    f"兜底模型 {FALLBACK_MODEL['id']} 已失效，改用 {alts[0]}")
-        return None, (f"本机没有 {FALLBACK_MODEL['providerID']}/"
-                      f"{FALLBACK_MODEL['id']} 这个兜底模型")
-
     def _run_turn(self, oc, sid, writer, q, prompt_text, files, t0):
         """投递消息 → 边跑边刷卡片 → 等空闲 → 取最终回答。
 
@@ -3682,55 +3842,69 @@ class AgentTurn:
             try:
                 run = self._run_turn(oc, sid, writer, q, prompt_text, files, t0)
 
-                # ---- 主模型额度/限流耗尽 → 自动切到兜底模型重来一次 ----
-                cur_msg = run.get("message")
-                cur_pid = run.get("provider") or ""
+                # ---- 主模型额度/限流/订阅耗尽 → 自动换到兜底模型重来 ----
+                # 2026-11-12 重写：原来的守卫是
+                #     cur_pid != FALLBACK_MODEL["providerID"]
+                # 只比 providerID —— 默认模型和兜底模型同属一个 provider 时，
+                # 这条守卫恒为 False，整个兜底分支**根本进不去** → 用户只看到
+                # 「（空回复）」。现在改成：命中额度类错误就换模型，且按**候选链**
+                # 一个个试（跨 provider 优先），每个都回读校验是否真的切过去了。
                 fb_err = ""
-                if (cur_msg and is_quota_error(cur_msg)
-                        and cur_pid != FALLBACK_MODEL["providerID"]):
-                    logger.warning("主模型不可用（%s/%s），切换兜底模型 %s/%s",
-                                   cur_pid, run.get("model"),
-                                   FALLBACK_MODEL["providerID"],
-                                   FALLBACK_MODEL["id"])
-                    fb, fb_err = self._resolve_fallback(oc)
-                    if fb is None:
-                        # 兜底模型本身不可用 → 不切、不假装切了，
-                        # 直接把原因交回给用户（否则又是一张空卡片）。
-                        logger.error("兜底模型不可用：%s", fb_err)
-                        if writer:
-                            writer.note(f"⚠️ 兜底模型不可用：{fb_err}")
-                    else:
+                cur_msg = run.get("message")
+                if cur_msg and is_quota_error(cur_msg):
+                    failed_pair = (run.get("provider") or "", run.get("model") or "")
+                    logger.warning("主模型不可用（%s/%s），开始切兜底模型",
+                                   failed_pair[0], failed_pair[1])
+                    tried: set = set()
+                    for _ in range(len(FALLBACK_CHAIN) + 1):
+                        cands, cands_err = resolve_fallback_candidates(
+                            oc, failed_pair, tried)
+                        if not cands:
+                            fb_err = fb_err or cands_err
+                            logger.error("兜底模型不可用：%s", cands_err)
+                            if writer:
+                                writer.note(f"⚠️ 兜底模型不可用：{cands_err}")
+                            break
+                        fb = cands[0]
+                        tried.add((fb["providerID"], fb["id"]))
                         try:
                             oc.switch_model(sid, fb["providerID"], fb["id"])
                         except Exception as e:  # noqa: BLE001
-                            logger.error("切换兜底模型失败: %s", e)
                             fb_err = f"切换到 {fb['id']} 失败：{e}"
+                            logger.error("%s", fb_err)
+                            continue
+                        # 回读确认真的切过去了：切换接口不校验 id，
+                        # 不回读就没法区分"切好了"和"切了个不存在的模型"。
+                        cur = oc.session_model(sid) or {}
+                        if (cur.get("providerID") != fb["providerID"]
+                                or cur.get("id") != fb["id"]):
+                            fb_err = (f"切到 {fb['providerID']}/{fb['id']} 没生效"
+                                      f"（现在还是 {cur.get('providerID')}/"
+                                      f"{cur.get('id')}）")
+                            logger.error("%s", fb_err)
                             if writer:
                                 writer.note(f"⚠️ {fb_err}")
-                        else:
-                            # 回读确认真的切过去了：切换接口不校验 id，
-                            # 不回读就没法区分"切好了"和"切了个不存在的模型"。
-                            cur = oc.session_model(sid) or {}
-                            if (cur.get("providerID") != fb["providerID"]
-                                    or cur.get("id") != fb["id"]):
-                                fb_err = (f"切到 {fb['providerID']}/{fb['id']} 没生效"
-                                          f"（现在还是 {cur.get('providerID')}/"
-                                          f"{cur.get('id')}）")
-                                logger.error("%s", fb_err)
-                                if writer:
-                                    writer.note(f"⚠️ {fb_err}")
-                            else:
-                                if writer:
-                                    writer.note(
-                                        f"⚠️ 主模型额度不足，已切到 {fb['id']}")
-                                run = self._run_turn(oc, sid, writer, q, prompt_text,
-                                                     files, t0)
-                                if run.get("stale"):
-                                    # 切过去了却一个 assistant 消息都没有：
-                                    # 模型 id 不存在 / provider 拿不到授权。
-                                    fb_err = (f"切到 {fb['providerID']}/{fb['id']} 后"
-                                              f"没有任何回复")
-                                    logger.error("%s", fb_err)
+                            continue
+                        if writer:
+                            writer.note(
+                                f"⚠️ 主模型额度不足，已切到 {fb['id']}")
+                        run = self._run_turn(oc, sid, writer, q, prompt_text,
+                                             files, t0)
+                        if run.get("stale"):
+                            # 切过去了却一个 assistant 消息都没有：
+                            # 模型 id 不存在 / provider 拿不到授权。
+                            fb_err = (f"切到 {fb['providerID']}/{fb['id']} 后"
+                                      f"没有任何回复")
+                            logger.error("%s", fb_err)
+                            continue
+                        nxt = run.get("message")
+                        if nxt and is_quota_error(nxt):
+                            # 这个兜底也不可用（多半是同一份订阅也满了）→ 试下一个
+                            fb_err = f"兜底模型 {fb['id']} 也不可用"
+                            logger.warning("%s，继续试下一个候选", fb_err)
+                            continue
+                        fb_err = ""
+                        break
             finally:
                 bus.unsubscribe(sid, q)
 
@@ -3761,6 +3935,13 @@ class AgentTurn:
                 elif run.get("stale"):
                     final_text = ("⚠️ 模型没有产生任何回复（会话直接结束）。"
                                   "可以用 `/model` 换一个模型后重发。")
+                elif run.get("finish") == "error":
+                    # 非额度类的模型错误（订阅到期、鉴权失败、模型下线……）：
+                    # 把 opencode 给的真实原因抖出来，别再打发一句「（空回复）」。
+                    detail = error_summary(run.get("message"))
+                    final_text = (f"⚠️ 模型报错，这一轮没有回复。\n\n"
+                                  f"`{detail}`\n\n"
+                                  f"可以用 `/model` 手动换一个模型后重发。")
                 else:
                     final_text = "🛑 已按你的要求中断。" if interrupted else "（空回复）"
             # v2 卡片会把超长回答分片成多个 block，不再粗暴截断丢内容；
@@ -3780,6 +3961,11 @@ class AgentTurn:
                         session_id=sid)
                 except Exception as e:  # noqa: BLE001
                     logger.warning("卡片问答归档失败：%s", e)
+
+            # 每一轮都往 journal 留一条证据（evolve 的输入，2026-11-02 起）。
+            # 「（空回复）」这种没有信息量的不记，免得污染证据。
+            if final_text and final_text.strip() not in ("（空回复）",):
+                journal_turn(msg.conversation_id, text, final_text, session_id=sid)
 
             finish = run.get("finish") or ""
             model_id = run.get("model") or ""
@@ -3823,8 +4009,7 @@ class AgentTurn:
             try:
                 if writer:
                     writer.finish("（出错了，没有拿到回答）", failed=True)
-                self.handler.reply_markdown("❌ 出错",
-                                            f"`{type(e).__name__}: {e}`", msg)
+                self.handler.reply_markdown("❌ 出错", turn_error_text(e), msg)
             except Exception:  # noqa: BLE001
                 pass
             return {"text": "", "finish": "error", "elapsed": time.time() - t0,
