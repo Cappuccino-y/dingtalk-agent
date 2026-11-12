@@ -1,0 +1,21 @@
+{
+  "type": "memory",
+  "title": "IC Monitor 的融资 -3% 只能用于强弱分级，不能作为硬剔除条件",
+  "scope": "project:dingtalk-agent",
+  "category": "gotcha",
+  "confidence": "high",
+  "body": "触发条件: IC Monitor 遇到融资指标变化达到 -3%，需要执行信号过滤或历史回测。\n动作: 将 ≤-3% 标记为融资强弱信号而不直接剔除样本；>-3% 标记为较弱，不设置硬门槛。调整规则后运行测试验证。\n适用范围: DingTalk Agent 的 IC Monitor 信号生成与历史回测。",
+  "evidence": "用融资条件-3去剔除的话，是不是会剔除一些有效样本？\nOK，全部改动一下，按照你推荐的，并且运行测试一下",
+  "supersedes": "",
+  "risk": "保留较弱样本可能增加噪声信号和候选触发数，需要依赖其他确认条件控制误报。",
+  "expected_gain": "避免硬阈值系统性删除有效历史样本，防止回测表现因样本选择而虚高。",
+  "source": "evolve",
+  "proposed_by": "MiniMax-M3",
+  "id": "prop_20261024-115650_f23d",
+  "created_at": "2026-10-24T03:56:50Z",
+  "status": "rejected",
+  "card_pushed_ts": 1792814212.2491384,
+  "card_pushed_at": "2026-10-24T03:56:52Z",
+  "decided_at": "2026-10-24T03:58:33Z",
+  "decision_note": "用户在钉钉审批卡上驳回"
+}

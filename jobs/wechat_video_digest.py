@@ -72,7 +72,7 @@ def save_state(data: dict) -> None:
     os.replace(tmp, STATE_PATH)
 
 
-def run_digest(timeout: int = 1800) -> dict:
+def run_digest(timeout: int = 1800, force: bool = False) -> dict:
     """调 wechat-monitor 处理当天文章，返回其 JSON 结果。"""
     if not WECHAT_PY.exists():
         return {"ok": False, "error": f"找不到 wechat-monitor 解释器: {WECHAT_PY}"}
@@ -83,9 +83,13 @@ def run_digest(timeout: int = 1800) -> dict:
     for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
         env.pop(k, None)
 
-    log.info(f"调用 digest: {WECHAT_PY} -m wechat_monitor.cli digest")
+    argv = [str(WECHAT_PY), "-u", "-m", "wechat_monitor.cli", "digest"]
+    if force:
+        argv.append("--force")
+
+    log.info(f"调用 digest: {' '.join(argv[1:])}")
     proc = subprocess.run(
-        [str(WECHAT_PY), "-u", "-m", "wechat_monitor.cli", "digest"],
+        argv,
         cwd=str(WECHAT_ROOT),
         capture_output=True,
         text=True,
@@ -132,13 +136,17 @@ def main() -> int:
     today = date.today().isoformat()
 
     try:
-        r = run_digest()
+        r = run_digest(force=args.force)
     except subprocess.TimeoutExpired:
         log.error("digest 超时（1800s）")
         return 1
 
     if r.get("skipped"):
-        log.info(f"跳过：{r.get('reason')}（最近一篇 {r.get('latest')}）")
+        reason = r.get("reason", "")
+        if "已处理过" in reason:
+            log.warning(f"跳过（重复）：{reason}")
+        else:
+            log.info(f"跳过：{reason}（最近一篇 {r.get('latest')}）")
         return 0
 
     if not r.get("ok"):

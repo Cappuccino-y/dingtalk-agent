@@ -562,6 +562,47 @@ def load_proposal(pid: str) -> dict | None:
     return json.load(open(path, encoding="utf-8"))
 
 
+def load_decided_proposal(pid: str) -> dict | None:
+    """**已经结算过**的提案（已批准归档 / 已驳回）—— 用来识别「重复提交」。
+
+    2026-11-12：审批卡会被钉钉**重复投递**（我们回写卡片状态就会触发一次，
+    把同一份表单旧值再投过来）。第二次再按 pid 去 proposals/ 找必然找不到 →
+    只能报「提案不存在」，把一次**已经成功**的审批显示成失败（10-26、11-12 各中一次）。
+    这里把已归档 / 已驳回的提案也捞出来，上层就能判成「重复提交，已忽略」。
+    """
+    for d in (os.path.join(PROPOSAL_DIR, "archive"), REJECTED_DIR):
+        path = os.path.join(d, f"{pid}.json")
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as fh:
+                p = json.load(fh)
+        except Exception:
+            return None
+        if isinstance(p, dict):
+            return p
+    return None
+
+
+def proposal_state(pid: str) -> str:
+    """提案当前状态：pending / approved / rejected / missing。
+
+    pending  = 还在 proposals/ 目录里等审批
+    approved = 已归档到 proposals/archive/
+    rejected = 已挪到 rejected/
+    missing  = 哪儿都没有（这个 id 从来就不存在）
+    """
+    if load_proposal(pid):
+        return "pending"
+    p = load_decided_proposal(pid)
+    if not p:
+        return "missing"
+    st = (p.get("status") or "").strip().lower()
+    if st in ("approved", "rejected"):
+        return st
+    return st or "missing"
+
+
 def list_proposals(status: str = "pending") -> list[dict]:
     if not os.path.isdir(PROPOSAL_DIR):
         return []

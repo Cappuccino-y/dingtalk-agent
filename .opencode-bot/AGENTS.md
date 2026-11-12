@@ -256,4 +256,32 @@ shutdown watcher 执行 —— **排空在飞回合 → 推一条「电脑即将
 - **改了结构性代码，回头在手册「改动史」加一行**（带日期），并在对应小节
   同步具体常量。不写的话下一个接手的人只能读 3400 行桥接代码猜。
 
+---
+
+## 九、公众号视频日报：可调用的查询接口
+
+`wechat-monitor` 每天 17:00 自动抓「远道擒龙」的复盘视频，转文字 + 提炼要点，
+历史存在本地 SQLite。**用户问到公众号内容时先查这个库，不要凭记忆答。**
+
+工作目录：`D:\PythonProject\wechat-monitor`
+解释器：`D:\PythonProject\wechat-monitor\.venv\Scripts\python.exe`
+
+| 需求 | 命令（前缀同上，`-m wechat_monitor.cli`） |
+|---|---|
+| 最近 N 篇列表 | `history --json --limit 10` |
+| 某天详情 | `show --date 2026-10-28 --json` |
+| 某篇详情 + 全文 | `show --msgid 2247491725 --full` |
+| 线上最新（含未处理） | `list --limit 5` |
+
+返回字段：`published` `title` `duration_s` `transcript_chars` `summary`
+`transcript_path` `msgid` `url`。
+
+规则：
+
+- 回复用户给「日期 + 标题 + 摘要要点」，**不要贴 JSON 原文**。
+- 库里没有的日期，如实说没有，不要编。
+- 这里**只查不抓**；抓取由调度器每天 17:00 负责。
+- 数据库：`D:\PythonProject\wechat-monitor\data\history.db`
+
+
 

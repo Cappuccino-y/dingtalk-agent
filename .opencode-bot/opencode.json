@@ -13,6 +13,30 @@
           "catalog": 60000,
           "execution": 300000
         }
+      },
+      "context7": {
+        "type": "local",
+        "command": ["npx", "-y", "@upstash/context7-mcp"],
+        "disabled": true
+      },
+      "drawio": {
+        "type": "local",
+        "command": [
+          "node",
+          "C:\\Users\\yydyy77\\.config\\opencode\\scripts\\drawio-mcp-launcher.js"
+        ],
+        "disabled": true
+      },
+      "rea": {
+        "type": "local",
+        "command": ["cmd.exe", "/d", "/c", "npx", "-y", "rea-agents@6.5.0", "mcp"],
+        "disabled": true
+      },
+      "brightdata": {
+        "type": "remote",
+        "url": "https://mcp.brightdata.com/mcp?token=3bd4447c-578b-421c-818a-38db83677159",
+        "oauth": false,
+        "disabled": true
       }
     }
   },

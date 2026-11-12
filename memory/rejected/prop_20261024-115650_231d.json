@@ -1,0 +1,21 @@
+{
+  "type": "memory",
+  "title": "IC Monitor 遇到 QVIX 缺日或长假前夜数据时应延后判定",
+  "scope": "project:dingtalk-agent",
+  "category": "gotcha",
+  "confidence": "high",
+  "body": "触发条件: IC Monitor 的 QVIX 计算窗口缺少交易日，或数据日期位于长假前夜。\n动作: QVIX 窗口有缺日时不进行信号判定；长假前夜的数据依据交易日历顺延到节后重新判定，可用数据日与下一交易日相差至少 4 个自然日作为顺延条件。修改后运行测试验证。\n适用范围: DingTalk Agent 的 IC Monitor 信号生成与历史回测。",
+  "evidence": "历史回测里面是不是用节日前的那个去搞比较合适？\nOK，全部改动一下，按照你推荐的，并且运行测试一下",
+  "supersedes": "",
+  "risk": "可能减少短期触发次数并造成漏报；交易日历或外部数据异常也可能影响顺延时机。",
+  "expected_gain": "避免缺数和节前指标失真造成假信号，使历史回测与实际推送采用一致口径。",
+  "source": "evolve",
+  "proposed_by": "MiniMax-M3",
+  "id": "prop_20261024-115650_231d",
+  "created_at": "2026-10-24T03:56:50Z",
+  "status": "rejected",
+  "card_pushed_ts": 1792814212.251139,
+  "card_pushed_at": "2026-10-24T03:56:52Z",
+  "decided_at": "2026-10-24T03:58:33Z",
+  "decision_note": "用户在钉钉审批卡上驳回"
+}

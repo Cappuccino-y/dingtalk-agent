@@ -57,9 +57,26 @@ def _snapshot(scope: str) -> dict:
     return snap
 
 
+def _decided_note(pid: str) -> tuple[bool, str]:
+    """这条提案是不是**已经结算过**（重复投递）？
+
+    返回 (是否结算过, 说明)。已批准 / 已驳回都不是「提案不存在」——
+    把重复投递报成失败，会把一次成功的审批显示成 ❌（2026-11-12 真机事故）。
+    """
+    state = ms.proposal_state(pid)
+    if state == "approved":
+        return True, "重复提交，已忽略（该提案此前已批准落地）"
+    if state == "rejected":
+        return True, "重复提交，已忽略（该提案此前已被驳回）"
+    return False, ""
+
+
 def approve(pid: str, force: bool = False) -> tuple[bool, str]:
     p = ms.load_proposal(pid)
     if not p:
+        decided, note = _decided_note(pid)
+        if decided:
+            return True, note
         return False, f"提案不存在: {pid}"
     if p.get("status") != "pending":
         return False, f"提案状态不是 pending: {p.get('status')}"
@@ -190,6 +207,9 @@ def retire(mid: str, note: str = "", scope: str = "global") -> tuple[bool, str]:
 def reject(pid: str, note: str = "") -> tuple[bool, str]:
     p = ms.load_proposal(pid)
     if not p:
+        decided, dnote = _decided_note(pid)
+        if decided:
+            return True, dnote
         return False, f"提案不存在: {pid}"
     ms.archive_proposal(pid, "rejected", note=note)
     ms.append_journal("proposal_rejected",
@@ -206,6 +226,9 @@ def defer(pid: str) -> tuple[bool, str]:
     """
     p = ms.load_proposal(pid)
     if not p:
+        decided, dnote = _decided_note(pid)
+        if decided:
+            return True, dnote
         return False, f"提案不存在: {pid}"
     p["defer_count"] = int(p.get("defer_count") or 0) + 1
     p["deferred_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())

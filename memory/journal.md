@@ -1048,3 +1048,51 @@ IC 监控**已经加进去了**，现在是调度器里的第二个作业：
 - answer: 这一轮失败：finish=error；模型 deepseek-v4.1-flash；原因：Your account (2113376857) does not have a valid AgentPlan subscription, or your subscription has expired.
 - source: backfill
 
+## 2026-11-12T14:47:41 — qa_turn
+- Summary: 嗯嗯你接着做 另外对于之前的超时问题需要你能够自动重试哈 不要回复先停在这里 需要你自动接着做
+- conv: cidwKuyECv5z+YK5cPBDeiA3wT/FKag4TRfj0dqHzRfrDk=
+- session: ses_e318a4cc3ffeh9IkcmgccrJIQN
+- answer: 做完了，全部已提交并排入重启（77d1431）。 **超时不再截断，改成三段（核心诉求）** - 软上限 30 分钟：只提醒「还在跑，我继续等，不用你催」，**不截断** → 这次事故那轮模型 12:58 就干完了，现在 30 分钟后不会断线 - 硬上限 60 分钟：判这轮卡死 → **自动续做**，给同一个会话补一条「【自动续做】接着上一轮没做完的事继续做」的指令，再开新窗口 - 续做 3 次仍没跑完才认输，并如实写「累计等了 N 分钟（已自动续做 M 次）」；中途随时可以 /stop - 投指令前先查 REST（这轮其实已答完就不投），会话忙到投不进去才 interrupt 后重投；决策逻辑抽成纯函数 `wait_policy()`，口径都有测试守着 - 阈值可用 `DINGTALK_WAIT_HARD` / `DINGTALK_AUTO_CONTINUE_MAX` 调 **evolve：失败回合优先提提案** - `qa_error` 用 300 条窗口单独收集，在提示词里放**最前面**并标「最高优先级」 - 提示词加硬规则：失败回合每条都要能提一条机制改进、evidence **必须引用它本身**、绝不允许拿别的正常对话顶替（上次误引 11-09/11-11 两条「你好」就是这么来的） - 范围闸门补词（模型/兜底/空回复/报错/截断/订阅/额度），不然这类提案会被当「跟
+
+## 2026-11-12T16:51:40 — stop
+- Summary: 用户反馈：stop
+- conv: cidwKuyECv5z+YK5cPBDeiA3wT/FKag4TRfj0dqHzRfrDk=
+- session: ses_e3165ceccffekaLYlWhSLfmEoO
+- detail: 用户中断了这一轮
+
+## 2026-11-12T16:51:40 — qa_error
+- Summary: 这个消息为什么都是乱的？显示没有换行 格式非常不适合阅读 另外超颖电子这个票的消息今天的新闻源有抓到吗
+- conv: cidwKuyECv5z+YK5cPBDeiA3wT/FKag4TRfj0dqHzRfrDk=
+- session: ses_e3165ceccffekaLYlWhSLfmEoO
+- answer: 这一轮被中断；模型 MiniMax-M3.1-Flash；原因：{"type": "aborted", "message": "Step interrupted"} The run is in the dedupe/pick stage. Let me wait and monitor:
+
+## 2026-11-12T19:53:18 — qa_turn
+- Summary: 之前超时是什么情况新闻没有找到吗
+- conv: cidwKuyECv5z+YK5cPBDeiA3wT/FKag4TRfj0dqHzRfrDk=
+- session: ses_e3073f728ffeUMlsbNaQOcWi9b
+- answer: **结论：不是"新闻没找到"——新闻抓到了，是被抓到之后又被三个环节分别丢掉。** **超时的真相（两层，别混）** - 桥接层（你看到的那个）：15:12 那轮超过 60 分钟硬上限 → 16:12 自动续做 → 16:51 你按 stop 把它打断（finish=error / aborted）→ 19:36 进程重启，那张卡才变成"重启前没有留下回答"。是**回合被中断**，不是脚本崩了。 - 脚本内：news_digest 的挑选阶段 19/25 批没在时限内跑完（MiniMax 单批 30~150s，服务端排队抖动，日志里另有一次 `Request timed out`）→ 没跑完的整批原样兜底进终稿，噪音就是这么灌进来的。 **超颖电子：抓到了**，我刚用 25h 窗口实抓复核，7 条： - 11-11 11:02 / 11:37 业绩说明会：AI算力、存储方向高阶 PCB 正推进客户认证及小批量供货 - 11-11 16:03 / 16:05 投资者关系记录：存储类订单能见度充足、长单锁定；黄石 P3 拟投 20.86 亿建 HDI - 11-12 09:42 / 09:46 三条：PCB 板块拉升、超颖电子涨停（纯行情播报） 今天早报（08:41 那轮）一条没有，两个原因：12h 回溯有盲区（11-11 08:41~20:41 两轮都不覆盖，16:03 那两条正好落
+
+## 2026-11-12T20:52:23 — stop
+- Summary: 用户反馈：stop
+- conv: cidwKuyECv5z+YK5cPBDeiA3wT/FKag4TRfj0dqHzRfrDk=
+- session: ses_e3073f728ffeUMlsbNaQOcWi9b
+- detail: 用户中断了这一轮
+
+## 2026-11-12T20:52:24 — qa_error
+- Summary: MiniMax 的 key opencode 里应该有两个吧 可以帮我做一个备选替换机制吗？一个 key 额度用完可以换另外一个？
+- conv: cidwKuyECv5z+YK5cPBDeiA3wT/FKag4TRfj0dqHzRfrDk=
+- session: ses_e3073f728ffeUMlsbNaQOcWi9b
+- answer: 这一轮被中断；模型 MiniMax-M3.1-Flash；原因：{"type": "aborted", "message": "Step interrupted"}
+
+## 2026-11-12T20:52:28 — stop
+- Summary: 用户反馈：stop
+- conv: cidwKuyECv5z+YK5cPBDeiA3wT/FKag4TRfj0dqHzRfrDk=
+- session: ses_e3073f728ffeUMlsbNaQOcWi9b
+- detail: 用户中断了这一轮
+
+## 2026-11-12T21:27:21 — qa_turn
+- Summary: 在 balance 额度查询里应该有两个 MiniMax 的 key 可以搞一个备选替换吗？类似 deepseek 与 MiniMax
+- conv: cidwKuyECv5z+YK5cPBDeiA3wT/FKag4TRfj0dqHzRfrDk=
+- session: ses_e3073f728ffeUMlsbNaQOcWi9b
+- answer: 做完了，机制已上线。 **核实结果：确实有两把 key，而且是两个独立额度池** `~/.minimax-config.json` 里 `lyy` / `gzl` 两把 coding-plan key，余额查询本来就列出了两把（刚补了标签：主 key / 备用 key）。实测剩余额度不同（72% vs 63%）、到期日不同（2027-06-10 vs 2027-07-17）→ 确实是两份额额，能互为备份。 **发现之前的判断有个错** 代码一直按 **providerID** 判断"是不是同一个配额池"，但 MiniMax 这两个 provider 挂的是**两把不同的 key** —— provider 不同 ≠ 池子相同。真判据是哪把 key。已改成显式的"额度池"概念（`pool` 字段 + 按池排序）。 **改了什么** - **兜底链**（聊天回合）：链首从 `minimax2/MiniMax-M3` 改成 `minimax2/MiniMax-M3.1-Flash` —— 换 key 时**模型不降级**，还是同一档质量。为此全局 `opencode.json` 给 minimax2 补上了 M3.1-Flash（原来只有 M3）。 - **直连路径**（早报/evolve 等作业）：新增 key 轮换 —— 一把报错自动换下一把重发同一请求。这条路以前只用一把，额度用完
+
