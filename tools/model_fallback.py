@@ -25,17 +25,53 @@ from __future__ import annotations
 #   写了不存在的 id 也返回 204「切成功」，但下一轮压根不产生 assistant
 #   消息 → 用户只拿到一张空卡片 + 一句假提示（2026-10-22 踩过）。
 # ⚠ providerID 也必须真实存在（各 provider 的 key 由本机 opencode 配置提供）。
+#
+# ⚠ 2026-11-12：MiniMax 有**两把 key**（两把都是 coding plan，各自独立额度池）。
+#   「providerID 不同」不等于「额度池不同」，也不等于「模型不同」——
+#   `minimax2` 这一个 provider 下挂着两把 key 下的多个模型，
+#   它们跟 `minimax-cn-coding-plan` 共享与否要**按 key 算**。
+#   所以这里引入显式的 **pool**（额度池）概念：
+#     pool 相同的模型 = 同一份订阅额度，一起挂 → 排序要分开；
+#     pool 不同的模型 = 独立额度，才能当真正的兜底。
+#   两把 MiniMax key 因此和 deepseek 一样，是**平级的独立兜底**。
 FALLBACK_CHAIN: tuple[dict, ...] = (
-    # 第二把 MiniMax key（Key 2）：和默认模型**不同 key、不同额度池**。
-    {"providerID": "minimax2", "id": "MiniMax-M3"},
+    # 第二把 MiniMax key（Key 2）上的**同一个模型**：
+    # 模型不降级、只换 key —— 首选兜底。
+    {"providerID": "minimax2", "id": "MiniMax-M3.1-Flash", "pool": "minimax-key2"},
     # DeepSeek 官方 key：与 MiniMax 完全独立的账号/额度。
-    {"providerID": "deepseek", "id": "deepseek-v4-pro"},
+    {"providerID": "deepseek", "id": "deepseek-v4-pro", "pool": "deepseek"},
     # 免费档：前两个都挂了时的最后一张牌（质量一般，但能出字）。
-    {"providerID": "opencode", "id": "minimax-m3.1-flash-free"},
-    # 同 provider 的兄弟模型放**最后**：coding plan 额度是共享的，
+    {"providerID": "opencode", "id": "minimax-m3.1-flash-free", "pool": "opencode-free"},
+    # 第二把 key 的老模型：跟链首**共用 Key 2 额度池**，Key 2 挂了它多半一起挂，
+    # 排到 deepseek 之后。
+    {"providerID": "minimax2", "id": "MiniMax-M3", "pool": "minimax-key2"},
+    # 默认模型同 provider 的兄弟模型：跟默认模型**共用 Key 1 额度池**，
     # 主模型额度耗尽时它多半也挂 —— 但「模型下线/鉴权挂了」这类故障它能救。
-    {"providerID": "minimax-cn-coding-plan", "id": "MiniMax-M3"},
+    {"providerID": "minimax-cn-coding-plan", "id": "MiniMax-M3", "pool": "minimax-key1"},
 )
+
+# providerID → 额度池。**按 key 算，不按 provider 算**：
+# 同一家 MiniMax 的两个 provider 挂着两把不同的 key → 两个独立的额度池。
+# 认不出来的 provider 一律自己成一个池（保守：不会误判成共享额度）。
+POOL_BY_PROVIDER: dict[str, str] = {
+    "minimax-cn-coding-plan": "minimax-key1",
+    "minimax2": "minimax-key2",
+    "deepseek": "deepseek",
+    "opencode": "opencode-free",
+}
+
+
+def pool_of(provider_id: str, entry: dict | None = None) -> str:
+    """某个候选模型属于哪个额度池。
+
+    链里显式写了 `pool` 就用它；否则按 providerID 查表；再查不到就
+    「一个 provider 一个池」——宁可当成独立的（多试一次），
+    也不要误判成共享额度（那样会把唯一的活牌排到最后）。
+    """
+    if entry and entry.get("pool"):
+        return entry["pool"]
+    return POOL_BY_PROVIDER.get(provider_id, provider_id)
+
 
 # 兼容旧引用（jobs/premarket_push.py 等按 FALLBACK_MODEL["id"] 用）。
 FALLBACK_MODEL: dict = dict(FALLBACK_CHAIN[0])
@@ -57,7 +93,9 @@ def candidates(available, failed=None, tried=None) -> list[dict]:
 
     排序规则
     --------
-    跨 provider 的候选排前面，同 provider 的排后面 —— 见模块头说明。
+    **跨额度池**的候选排前面，同池的排后面 —— 见模块头说明。
+    判据是 pool（哪把 key），**不是 providerID**：MiniMax 的两个 provider
+    挂着两把不同的 key，是两个独立额度池，必须当平级的独立兜底。
     同组内保持 FALLBACK_CHAIN 声明的优先级（稳定排序）。
     """
     if not available:
@@ -75,6 +113,9 @@ def candidates(available, failed=None, tried=None) -> list[dict]:
         picked.append(dict(c))
 
     failed_provider = (failed or ("", ""))[0]
-    cross = [c for c in picked if c.get("providerID") != failed_provider]
-    same = [c for c in picked if c.get("providerID") == failed_provider]
+    failed_pool = pool_of(failed_provider)
+    cross = [c for c in picked
+             if pool_of(c.get("providerID"), c) != failed_pool]
+    same = [c for c in picked
+            if pool_of(c.get("providerID"), c) == failed_pool]
     return cross + same

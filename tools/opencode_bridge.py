@@ -91,9 +91,14 @@ FALLBACK_CHAIN = model_fallback.FALLBACK_CHAIN if model_fallback else ()
 # （例如 minimax-m3），只写 id 会有歧义。
 # 2026-11-12：火山 Agent Plan 订阅到期 → volcengine-agent-plan/* 全部秒失败，
 #   把它留在候选里等于给用户发一张必挂的卡。改成**本机实测能出字**的三个。
+# 2026-11-12 晚：第二把 MiniMax key（minimax2）补上了 MiniMax-M3.1-Flash
+#   （见 ~/.config/opencode/opencode.json），于是它能和默认模型**同模型换 key**，
+#   不再是「降级到旧模型」。/model 卡片也把它列出来，标签写清是哪把 key。
 MODEL_CHOICES = [
     {"key": "minimax-cn-coding-plan|MiniMax-M3.1-Flash",
-     "label": "MiniMax 3.1", "id": "MiniMax-M3.1-Flash"},
+     "label": "MiniMax 3.1（主 key）", "id": "MiniMax-M3.1-Flash"},
+    {"key": "minimax2|MiniMax-M3.1-Flash",
+     "label": "MiniMax 3.1（备用 key）", "id": "MiniMax-M3.1-Flash"},
     {"key": "minimax2|MiniMax-M3",
      "label": "MiniMax M3（备用 key）", "id": "MiniMax-M3"},
     {"key": "deepseek|deepseek-v4-pro",
@@ -116,6 +121,17 @@ _QUOTA_ERROR_PAT = (
     # 于是自动切兜底的逻辑没触发，用户只收到「（空回复）」。
     "subscription", "subscribe", "expired", "agentplan", "not activated",
     "未开通", "订阅", "已过期", "到期",
+    # 2026-11-12 晚：MiniMax 的额度错误**不一定带英文关键词**，官方文档
+    # 把错误码放在响应体 base_resp.status_code 里，英文原文可能是
+    # "exceeded the M Plan resource limit" / "insufficient balance"，
+    # 也可能只有一句中文或一个数字码。补上 MiniMax 的官方错误码
+    # （官方错误码表：https://platform.minimaxi.com/docs/api-reference/errorcode）：
+    #   1002 请求频率超限 / 1008 余额不足 / 2056 超出 Token Plan 资源限制
+    #   2062 超出 M Plan 速率限制 / 2067 套餐额度已用完
+    # 码以括号形式出现在 message 里（实测："... (2013)"），所以按 "(1002)" 这种
+    # 带括号的形式匹配，避免误伤正文里的裸数字。
+    "(1002)", "(1008)", "(2056)", "(2062)", "(2067)",
+    "token plan", "m plan", "m-plan", "资源限制", "速率限制", "套餐额度",
 )
 
 POLL_INTERVAL = 0.6
