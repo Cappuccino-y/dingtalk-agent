@@ -219,3 +219,20 @@ source.agentIds: evolve, user-approved
 动作: 每次重新读取实际落盘的作业注册表并据此枚举，明确报告相对此前清单的新增、移除或变更项；不得沿用上一轮对话中的静态清单或直接报告过时数量。
 适用范围: dingtalk-agent 的作业盘点、状态查询及重启后核验。
 
+---
+memoryId: mem_676da271_55787
+timestamp: 2026-11-12T03:56:27Z
+scope: project:dingtalk-agent
+category: gotcha
+title: 有效消息不得以空回复结束
+tags: [evolve]
+confidence: high
+trust: self
+source.messageIds: proposal:prop_20261112-100149_c7ef
+source.agentIds: evolve, user-approved
+---
+
+触发条件: 用户发送普通有效消息，但回复生成或流式收尾后没有产生任何可见文本。
+动作: 在发送前检查最终响应；为空时不得发送空白回合，应执行内置兜底回复并记录一次响应生成异常，必要时触发一次重试。
+适用范围: DingTalk Agent 的消息回复、流式输出及发送收尾链路。
+
