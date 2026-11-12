@@ -115,7 +115,7 @@ def run_manual(job: Job, extra_args: list[str] | None = None,
         db.start_run(job.id, occ, 1, trigger=trigger, actor=actor)
 
     status = runner.run_job(job, now, attempt=1, trigger=trigger, actor=actor,
-                            occurrence_key=occ, extra_args=extra_args)
+                            occurrence_key=occ, extra_args=extra_args, final=True)
     return {"ok": status == "success", "status": status, "busy": False,
             "occurrence": occ, "job": job.id}
 
@@ -147,7 +147,7 @@ def start_manual(job: Job, extra_args: list[str] | None = None,
         try:
             status = runner.run_job(job, now, attempt=1, trigger=trigger,
                                     actor=actor, occurrence_key=occ,
-                                    extra_args=extra_args)
+                                    extra_args=extra_args, final=True)
             result = {"ok": status == "success", "status": status,
                       "busy": False, "occurrence": occ, "job": job.id}
         except Exception as e:  # noqa: BLE001

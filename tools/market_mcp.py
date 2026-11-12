@@ -119,10 +119,9 @@ def market_quote() -> str:
     title="外围市场行情",
     description=(
         "获取外围市场最新行情：**美股隔夜收盘**（道琼斯/纳斯达克/标普500/纳斯达克100，含收盘时间），"
-        "以及日经225、恒生指数、英国富时100。"
+        "以及日经225、韩国KOSPI、恒生指数、英国富时100（东方财富实时源，带时间戳）。"
         "**做市场走势/点位/策略分析时必须先看这个** —— 隔夜美股的方向和幅度会直接决定 A 股开盘情绪，"
         "这是判断『今天该做多还是做空』的第一手依据。毫秒级返回。"
-        "（新浪无 KOSPI 数据，韩股暂缺。）"
     ),
     annotations={**RO, "idempotent_hint": True},
 )
@@ -138,7 +137,9 @@ def market_overseas() -> str:
         if v.get("group") == "us":
             us.append(f"- {k}：{v['price']:.2f}（{v['change_pct']:+.2f}%）{v.get('time', '')}".rstrip())
         else:
-            ae.append(f"- {k}：{v['price']:.2f}（{v['change_pct']:+.2f}%）")
+            stale = "　⚠数据源可能过期" if v.get("stale_source") else ""
+            ae.append(f"- {k}：{v['price']:.2f}（{v['change_pct']:+.2f}%）"
+                      f"{v.get('time', '')}{stale}".rstrip())
     parts = []
     if us:
         parts.append("**美股隔夜**\n" + "\n".join(us))

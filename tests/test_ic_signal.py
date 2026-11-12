@@ -192,6 +192,57 @@ class TestRunOnceBehaviour(unittest.TestCase):
             df = df[df["date"] <= pd.Timestamp(last_date)].reset_index(drop=True)
         return df
 
+    def test_missing_qvix_does_not_zero_out_other_conditions(self):
+        """2026-10-25 修：守门**按指标分开算**。
+
+        老写法：只要有任一数据缺失，qvix_ok / margin_ok 一起打成 False →
+        QVIX 缺一天，融资明明 -7.25% < 0 也被显示成 ❌（用户以为条件不满足）。
+        现在：每项只受自己那侧的数据影响。
+
+        2026-11-09：`data_ok=False` 仍表示「有缺口」，但**不再是整轮拒判**
+        —— 其余三项都满足时升级成「待确认」，因为信号本身确实没触发。
+        """
+        df = self._df_triggers()
+        df.loc[df.index[-1], "qvix"] = np.nan            # 只缺 QVIX
+        checked = icm.check_bottom_signal(icm.prepare_signals(df))
+        self.assertFalse(checked["qvix_ok"])             # QVIX 那项不成立
+        self.assertTrue(checked["margin_ok"])            # 融资那项照常判（-3.8% < 0）
+        self.assertFalse(checked["data_ok"])             # 有缺口
+        self.assertFalse(checked["triggered"])
+        self.assertIn("QVIX", checked["stale_reason"])
+        self.assertFalse(checked["hard_bad"])            # 不是「真的没法判」
+        self.assertTrue(checked["pending_confirm"])      # 其余条件已满足 → 待确认
+        self.assertEqual(icm.bottom_state_text(checked),
+                         "⚠️ 待确认（QVIX 缺，其余条件已满足）")
+
+    def test_self_qvix_fallback_never_triggers(self):
+        """2026-10-26：自算 QVIX 只进 qvix_self 列**仅作参考**，不得影响判定。
+
+        官方 QVIX 缺最新日 + 自算值满窗 → 结果仍必须是 data_ok=False / triggered=False，
+        且 qvix_self 那份「看起来满足条件」的动量不能把 qvix_ok 顶成 True。
+        """
+        df = self._df_triggers()
+        df.loc[df.index[-1], "qvix"] = np.nan
+        # 自算序列：5 日大幅回落（如果被当成判据，抄底就误触发了）
+        n = len(df)
+        df["qvix_self"] = np.concatenate([np.full(n - 6, 30.0), np.linspace(40, 24, 6)])
+        checked = icm.check_bottom_signal(icm.prepare_signals(df))
+        self.assertFalse(checked["qvix_ok"])
+        self.assertFalse(checked["data_ok"])
+        self.assertFalse(checked["triggered"])
+        # 但参考值要能拿到（卡片上要显示）
+        self.assertAlmostEqual(checked["qvix_self_val"], 24.0, places=6)
+        self.assertLess(checked["qvix_self_mom_5d"], -0.03)
+
+    def test_missing_margin_does_not_zero_out_qvix(self):
+        """反向：融资缺 → 融资那项不成立，QVIX 项照常判。"""
+        df = self._df_triggers()
+        df.loc[df.index[-1], "margin"] = np.nan
+        checked = icm.check_bottom_signal(icm.prepare_signals(df))
+        self.assertFalse(checked["margin_ok"])
+        self.assertTrue(checked["qvix_ok"])
+        self.assertFalse(checked["data_ok"])
+
     def test_deferral_skips_judgement(self):
         """最新数据日是长假前夜 → 不判定、不推、状态记下顺延。"""
         df = self._df_triggers(last_date="2026-09-24")
@@ -204,15 +255,23 @@ class TestRunOnceBehaviour(unittest.TestCase):
         self.assertEqual(icm.load_state().get("deferred_date"), "2026-09-24")
 
     def test_gap_blocks_trigger(self):
-        """QVIX 窗口缺日 → 不触发（data_ok=False）。"""
+        """QVIX 窗口缺日 → 不触发；但其余条件照常判、状态不是"整轮拒判"。"""
         df = self._df_triggers()
         df["qvix"].iloc[-3] = np.nan               # 制造窗口缺口
         with mock.patch.object(icm, "load_latest_data", return_value=df):
             res = icm.run_once(dry_run=False)
         self.assertFalse(res["bottom_triggered"])
         self.assertFalse(res["data_ok"])
+        self.assertTrue(res["pending_confirm"])
+        self.assertEqual(res["missing_qvix_dates"], [df["date"].iloc[-3].strftime("%Y-%m-%d")])
         checked = icm.check_bottom_signal(icm.prepare_signals(df))
         self.assertIn("QVIX窗口缺日", checked["stale_reason"])
+        self.assertFalse(checked["hard_bad"])
+        # 心跳文案要把缺的那天写清楚，并说明「条件2 无法确认」
+        text = self.sent[0][0]
+        self.assertIn("待确认", text)
+        self.assertIn(df["date"].iloc[-3].strftime("%Y-%m-%d"), text)
+        self.assertNotIn("拒判", text)
 
     def test_trigger_pushes_once_and_has_strength(self):
         """触发 → 推一条；消息里带强度分级；再跑一次不重复推。"""
@@ -258,6 +317,7 @@ class TestWeekendBehaviour(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.state_path = Path(self.tmp.name) / "state.json"
         self.sent: list = []
+        _FrozenDatetime.frozen = datetime(2026, 10, 25, 8, 50)   # 周日（用例会改它）
         patches = [
             mock.patch.object(icm, "STATE_PATH", self.state_path),
             mock.patch.object(icm, "SIGNAL_HISTORY", Path(self.tmp.name) / "history.json"),
@@ -298,16 +358,124 @@ class TestWeekendBehaviour(unittest.TestCase):
         self.assertIn("非交易日回顾", self.sent[0][0])
         self.assertEqual(self.sent[0][1], "IC 非交易日回顾")
 
-    def test_weekend_same_data_does_not_spam(self):
-        """同一份数据（周日再跑）→ 跳过，不重复推回顾。"""
+    def test_weekend_same_day_runs_once(self):
+        """同一天重复跑 → 只推一条（按运行日去重）。"""
         df = self._df_flat()
         with mock.patch.object(icm, "datetime", _FrozenDatetime):
             with mock.patch.object(icm, "load_latest_data", return_value=df):
                 res1 = icm.run_once(dry_run=False)
                 res2 = icm.run_once(dry_run=False)
         self.assertEqual(res1["sent"], ["heartbeat"])
-        self.assertEqual(res2.get("skipped"), "no-new-data")
+        self.assertEqual(res2.get("skipped"), "heartbeat-already-sent")
         self.assertEqual(len(self.sent), 1)
+
+    def test_next_day_same_data_still_pushes(self):
+        """2026-10-25 改：**每天早上必有一条**。
+
+        同一份收盘数据（周末没新行情）隔天再跑，也要推一条 —— 老的
+        「数据日没变就跳过」会把周日 08:50 这一轮整个吞掉（用户反馈的漏发）。
+        """
+        df = self._df_flat()
+        _FrozenDatetime.frozen = datetime(2026, 10, 25, 8, 50)      # 周日
+        with mock.patch.object(icm, "datetime", _FrozenDatetime):
+            with mock.patch.object(icm, "load_latest_data", return_value=df):
+                res1 = icm.run_once(dry_run=False)
+                _FrozenDatetime.frozen = datetime(2026, 10, 26, 8, 50)  # 周一
+                res2 = icm.run_once(dry_run=False)
+        self.assertEqual(res1["sent"], ["heartbeat"])
+        self.assertEqual(res2["sent"], ["heartbeat"])     # 没被"无新数据"吞掉
+        self.assertEqual(len(self.sent), 2)
+        # 第二条仍标明结论基于哪个交易日
+        self.assertIn(df["date"].iloc[-1].strftime("%Y-%m-%d"), self.sent[1][0])
+
+
+class TestDataLagNote(unittest.TestCase):
+    """2026-10-25：行情源比交易日历慢时，消息里必须明说结论基于哪一天。"""
+
+    def test_note_when_source_lags(self):
+        cal = {datetime(2026, 10, 22).date(), datetime(2026, 10, 23).date()}
+        with mock.patch.object(icm, "_trade_calendar", return_value=cal):
+            note = icm.data_lag_note("2026-10-22", now=datetime(2026, 10, 25, 8, 50))
+        self.assertIn("行情源滞后", note)
+        self.assertIn("2026-10-23", note)
+
+    def test_no_note_when_up_to_date(self):
+        cal = {datetime(2026, 10, 22).date(), datetime(2026, 10, 23).date()}
+        with mock.patch.object(icm, "_trade_calendar", return_value=cal):
+            note = icm.data_lag_note("2026-10-23", now=datetime(2026, 10, 25, 8, 50))
+        self.assertEqual(note, "")
+
+
+class TestStatusDisplay(unittest.TestCase):
+    """2026-10-25：缺数据要显示成「⚠️缺」，不能混成 ❌（用户被误导过）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.sent: list = []
+        patches = [
+            mock.patch.object(icm, "STATE_PATH", Path(self.tmp.name) / "state.json"),
+            mock.patch.object(icm, "SIGNAL_HISTORY", Path(self.tmp.name) / "history.json"),
+            mock.patch.object(icm, "LATEST_SIGNAL", Path(self.tmp.name) / "latest.json"),
+            mock.patch.object(icm, "push_bot_message",
+                              side_effect=lambda text, title="t": self.sent.append((text, title)) or True),
+            mock.patch.object(icm, "_trade_calendar", return_value=set()),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        icm._TRADE_CAL = None
+        icm._TRADE_CAL_TS = 0.0
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_missing_value_shows_not_satisfied(self):
+        """QVIX 缺失 → 显示「缺 ⚠️」；融资有值且满足 → 显示「✅」。"""
+        dates = pd.bdate_range(start="2026-06-01", end="2026-10-23").tolist()
+        n = len(dates)
+        df = make_df(dates,
+                     spot=np.linspace(7000, 5500, n),
+                     qvix=np.linspace(30, 24, n),
+                     margin=np.linspace(14000, 12000, n))
+        df.loc[df.index[-1], "qvix"] = np.nan
+        sig = icm.prepare_signals(df)
+        bottom = icm.check_bottom_signal(sig)
+        top = icm.check_top_signal(sig)
+        icm.notify_dingtalk_heartbeat(bottom, top, weekend=True)
+        text = self.sent[0][0]
+        self.assertIn("QVIX 5日 = ", text)
+        # 2026-10-26：最新日缺 QVIX 时不再只显示一个「缺」，而是把上一个有效日的
+        # 动量摆出来并标明口径（图标仍是 ⚠️缺）
+        self.assertIn("截至", text)
+        self.assertIn("⚠️缺", text)
+        self.assertIn("融资20日 = ", text)
+        self.assertNotIn("nan%", text)
+        # 2026-11-09：缺 QVIX 不再把整张卡打成「拒判」——其余条件照常判，
+        # 状态改写成「未触发（QVIX 缺，条件2 无法确认）」，并写清缺的是哪一天。
+        self.assertIn("无法确认", text)
+        self.assertIn("2026-10-23", text)
+        self.assertNotIn("拒判", text)
+
+    def test_all_other_conditions_pass_shows_pending(self):
+        """其余三项全满足、只差 QVIX → 状态「⚠️待确认」，不是静默的「未触发」。"""
+        dates = pd.bdate_range(start="2026-06-01", end="2026-10-23").tolist()
+        n = len(dates)
+        rng = np.random.default_rng(11)
+        spot = 7000 * np.cumprod(1 + rng.normal(-0.006, 0.02, n))
+        df = make_df(dates,
+                     spot=spot,
+                     qvix=np.linspace(30, 24, n),
+                     margin=np.linspace(14000, 12000, n))
+        df.loc[df.index[-2], "qvix"] = np.nan      # 窗口里缺一天
+        sig = icm.prepare_signals(df)
+        bottom = icm.check_bottom_signal(sig)
+        top = icm.check_top_signal(sig)
+        self.assertTrue(bottom["pending_confirm"])
+        self.assertEqual(icm.bottom_state_text(bottom),
+                         "⚠️ 待确认（QVIX 缺，其余条件已满足）")
+        self.sent.clear()
+        icm.notify_dingtalk_heartbeat(bottom, top)
+        self.assertEqual(self.sent[0][1], "IC 待确认信号")
 
 
 if __name__ == "__main__":

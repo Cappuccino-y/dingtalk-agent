@@ -52,17 +52,25 @@ def _kill_tree(pid: int) -> None:
 def run_job(job: Job, occurrence: datetime, attempt: int = 1,
             trigger: str = "scheduled", actor: str | None = None,
             occurrence_key: str | None = None,
-            extra_args: list[str] | None = None) -> str:
+            extra_args: list[str] | None = None,
+            final: bool | None = None) -> str:
     """同步执行一次，返回最终状态（success / failed / timeout）。
 
     trigger/actor 只用于留痕（scheduled / manual / chat + 谁点的）；
     occurrence_key 给手动跑用独立键（manual:...），不占定时那条记录；
     extra_args 原样拼在作业命令后面（例如 --dry-run）。
+
+    final：这次是不是「最后一次机会」。**中间次数的失败不推钉钉**——2026-11-02
+    那次 IC 补判就是这样：09:20 抓 QVIX 日线被截断（IncompleteRead）退出码 1，
+    推了一张「执行失败」卡，结果 3 分钟后调度器自动重试已经成功。真正的失败
+    （次数用完 / 窗口来不及再试）在 daemon 里算出 final=True，照常告警。
     """
     occ = occurrence_key or occurrence.strftime(job.occurrence_fmt)
     argv = list(job.argv) + list(extra_args or [])
     os.makedirs(JOB_LOG_DIR, exist_ok=True)
     logpath = job_log_path(job)
+    if final is None:
+        final = attempt >= job.max_attempts
 
     db.start_run(job.id, occ, attempt, trigger=trigger, actor=actor)
     started = time.time()
@@ -109,7 +117,12 @@ def run_job(job: Job, occurrence: datetime, attempt: int = 1,
              job.id, duration, exit_code)
 
     if status != "success" and job.notify_on_fail:
-        notify.job_failed(job.id, job.name, occ, status, exit_code, tail)
+        if final:
+            notify.job_failed(job.id, job.name, occ, status, exit_code, tail,
+                              attempt=attempt, max_attempts=job.max_attempts)
+        else:
+            log.warning("✖ %s 第 %d/%d 次失败（不告警，%d 秒后自动重试）",
+                        job.id, attempt, job.max_attempts, job.retry_delay_s)
     return status
 
 

@@ -40,14 +40,24 @@ def send(text: str, title: str = "调度器", key: str | None = None) -> bool:
 
 
 def job_failed(job_id: str, job_name: str, occurrence: str, status: str,
-               exit_code: int | None, tail: str = "") -> bool:
-    """作业失败/超时的统一告警（每个 occurrence 只发一次）。"""
+               exit_code: int | None, tail: str = "",
+               attempt: int | None = None,
+               max_attempts: int | None = None) -> bool:
+    """作业失败/超时的统一告警（每个 occurrence 只发一次）。
+
+    只在「没机会再试了」的时候调用（见 runner.run_job 的 final 参数）——
+    中间次数的失败静默重试，否则一次网络抖动就会推一张假的「执行失败」卡。
+    """
     icon = "⏱" if status == "timeout" else "❌"
     cols = [
         f"**{icon} {job_name}**（{job_id}）",
         f"计划时刻：{occurrence.replace('T', ' ')}",
         f"结果：{status}" + (f"，退出码 {exit_code}" if exit_code is not None else ""),
     ]
+    if attempt and max_attempts and attempt >= max_attempts:
+        cols.append(f"已试 {attempt}/{max_attempts} 次，不再自动重试。")
+    elif attempt:
+        cols.append(f"已试 {attempt}/{max_attempts or '?'} 次，剩余窗口已不够再试。")
     if tail.strip():
         cols += ["", "**日志尾部**"]
         cols += [f"> {ln}" for ln in tail.strip().splitlines()[-12:]]

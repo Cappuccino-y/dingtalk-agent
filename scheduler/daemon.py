@@ -102,12 +102,23 @@ def decide(job: Job, now: datetime) -> tuple[datetime, int] | None:
     return occ, attempt
 
 
+def _can_retry(job: Job, occ: datetime, attempt: int, now: datetime) -> bool:
+    """这次失败之后还赶得上重试吗（次数没到 + 重试时刻还在窗口内）。"""
+    if attempt >= job.max_attempts:
+        return False
+    retry_at = now + timedelta(seconds=job.retry_delay_s)
+    return retry_at <= occ + timedelta(minutes=job.window_min)
+
+
 def _launch(job: Job, occ: datetime, attempt: int) -> None:
     key = (job.id, occ.strftime(job.occurrence_fmt))
+    # 用「拉起时」判断：越靠窗口尾部，越可能已经来不及重试 → 直接按最终失败告警，
+    # 避免中间次数不告警、最后又因为窗口过期没人再跑导致的静默失败。
+    final = not _can_retry(job, occ, attempt, datetime.now())
 
     def _worker():
         try:
-            runner.run_job(job, occ, attempt)
+            runner.run_job(job, occ, attempt, final=final)
         except Exception as e:  # noqa: BLE001
             log.exception("作业 %s 执行异常：%s", job.id, e)
 

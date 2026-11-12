@@ -91,10 +91,23 @@ def get_all_prices() -> dict:
 
 
 # ============ 外围市场（美股夜盘 / 亚太 / 欧洲）============
-# 新浪国际指数接口，免费不限流、毫秒级。
+# 美股：新浪 gb_* 接口，带收盘时间，实测与东方财富一致，保留。
 #   gb_*  : 美股，字段 = 名称, 价格, 涨跌幅%, 时间, ...
-#   int_* : 国际指数，字段 = 名称, 价格, 涨跌点数, 涨跌幅%
-# 注意：新浪没有 KOSPI，韩股需另找数据源（yfinance 当前被限流）。
+# 亚太 / 欧洲：**必须用东方财富**（push2.eastmoney.com）。
+#   ⚠ 血泪教训（2026-10-28 发现）：新浪 int_* 系列会长期不更新且**不带时间戳**，
+#   2026-10-28 当天新浪 int_nikkei 还停在 44946.64（-0.90%），
+#   实际日经收 63954.19（+1.08%）；int_ftse 同样停在 9284.83（实际 10671.01）。
+#   新浪也不提供 KOSPI。东财这三个都有实时值 + f124 时间戳，顺带补上韩国 KOSPI。
+EM_OVERSEAS_URL = ("https://push2.eastmoney.com/api/qt/ulist.np/get"
+                   "?secids={secids}&fields=f1,f2,f3,f4,f12,f13,f14,f124")
+EM_OVERSEAS_CODES = {
+    "日经225": "100.N225",
+    "韩国KOSPI": "100.KS11",
+    "恒生指数": "100.HSI",
+    "英国富时100": "100.FTSE",
+}
+
+# 新浪兜底（东财整体失败时才用；值为过期数据，仅避免整块空白）
 OVERSEAS_CODES = {
     "道琼斯": "gb_dji",
     "纳斯达克": "gb_ixic",
@@ -107,15 +120,43 @@ OVERSEAS_CODES = {
 
 # 分组，便于"美股夜盘"与"亚太欧洲"分开呈现
 US_KEYS = ("道琼斯", "纳斯达克", "标普500", "纳斯达克100")
-ASIA_EU_KEYS = ("日经225", "恒生指数", "英国富时100")
+ASIA_EU_KEYS = ("日经225", "韩国KOSPI", "恒生指数", "英国富时100")
 
 
-def get_overseas_prices() -> dict[str, dict]:
-    """获取外围市场行情。
+def _fetch_em_overseas() -> dict[str, dict]:
+    """东方财富：亚太 / 欧洲指数（实时，带时间戳）。失败返回空 dict。"""
+    secids = ",".join(EM_OVERSEAS_CODES.values())
+    try:
+        resp = requests.get(EM_OVERSEAS_URL.format(secids=secids),
+                            headers=HEADERS, timeout=8)
+        payload = resp.json()
+    except Exception:
+        return {}
+    diff = (payload.get("data") or {}).get("diff") or []
+    result = {}
+    for row in diff:
+        secid = f"{row.get('f13')}.{row.get('f12')}" if row.get("f13") else row.get("f12")
+        name = next((cn for cn, c in EM_OVERSEAS_CODES.items() if c == secid), None)
+        if not name:
+            continue
+        scale = 10 ** int(row.get("f1") or 2)
+        price = row.get("f2")
+        pct = row.get("f3")
+        if price in (None, "-") or pct in (None, "-"):
+            continue
+        ts = row.get("f124")
+        result[name] = {
+            "name": row.get("f14") or name,
+            "price": round(float(price) / scale, 2),
+            "change_pct": round(float(pct) / scale, 2),
+            "time": time.strftime("%Y-%m-%d %H:%M", time.localtime(ts)) if ts else "",
+            "group": "asia_eu",
+        }
+    return result
 
-    返回: {"道琼斯": {"name","price","change_pct","time","group"}, ...}
-    解析失败或接口异常时返回已成功解析的部分（可能为空 dict）。
-    """
+
+def _fetch_sina_overseas() -> dict[str, dict]:
+    """新浪：美股 gb_*（可靠）+ 国际指数 int_*（可能过期，仅兜底）。"""
     codes = list(OVERSEAS_CODES.values())
     try:
         resp = requests.get(SINA_URL.format(codes=",".join(codes)),
@@ -155,10 +196,30 @@ def get_overseas_prices() -> dict[str, dict]:
                     "change_pct": float(fields[3]),
                     "time": "",
                     "group": "asia_eu",
+                    "stale_source": "sina",
                 }
         except (ValueError, IndexError):
             continue
     return result
+
+
+def get_overseas_prices() -> dict[str, dict]:
+    """获取外围市场行情。
+
+    返回: {"道琼斯": {"name","price","change_pct","time","group"}, ...}
+    解析失败或接口异常时返回已成功解析的部分（可能为空 dict）。
+    亚太 / 欧洲优先走东方财富（实时 + 时间戳），失败才退回新浪 int_*。
+    """
+    result = _fetch_sina_overseas()          # 美股 + 兜底亚太
+    em = _fetch_em_overseas()                # 亚太 / 欧洲（权威）
+    if em:
+        for name in ASIA_EU_KEYS:            # 清掉新浪可能过期的亚太值
+            result.pop(name, None)
+        result.update(em)
+
+    # 按固定顺序输出，避免 dict 顺序被 pop/update 打乱
+    order = US_KEYS + ASIA_EU_KEYS
+    return {k: result[k] for k in order if k in result}
 
 
 if __name__ == "__main__":

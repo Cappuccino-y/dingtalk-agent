@@ -2,10 +2,12 @@
 IC 期货多信号监控（抄底 + 顶部预警/确认）—— **由本 bot 自主管理（2026-10-23 收回）**
 
 IC 监控整条链归本机器人（用户 2026-10-23 明确：「这个 icmonitor 完全由你控制」）：
-- 定时：本仓库调度器作业 `ic_monitor`（08:50，**周一~周五+周末每天都跑**）/ `ic_recheck`（09:20）/ `ic_weekly`（周一 09:05）
+- 定时：本仓库调度器作业 `ic_monitor`（08:50，**每天都跑**）/ `ic_recheck`（09:20，每天）/ `ic_weekly`（周一 09:05）
 - 周末行为（2026-10-24 用户要求）：周末照跑，判的是**最新交易日**的数据
-  （周六早上 akshare 最新数据 = 周五收盘），推一份「非交易日回顾」；
-  同一份数据没有更新（周日再跑）就跳过，不刷屏。信号按数据日去重，不会重推。
+  （周六早上 akshare 最新数据 = 周五收盘），推一份「非交易日回顾」。
+- 推送节奏（2026-10-25 用户反馈「今天早上又没有预报」后改）：**每天早上必有一条**。
+  心跳按**运行日**去重（不再按数据日），信号按**数据日**去重（同一条信号不重推）；
+  行情源比交易日历慢时，消息里明说「应到 X / 实际到 Y」。
 - 推送：**本机器人 1:1 通道**（tools.dingtalk_push）→ 署名是本机器人，不是「py 小助手」群机器人
 - 状态/历史：本仓库 `var/ic/`（已并入 MainToy 那条链的历史，10-22 那条抄底不会重推）
 - 手动入口：`/ic`（聊天）或 `python -m scheduler run ic_monitor`（命令行，作业 id 只能用 id）
@@ -52,7 +54,7 @@ import json
 import argparse
 import logging
 import akshare as ak
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 import pandas as pd
 import numpy as np
@@ -174,7 +176,46 @@ def load_latest_data():
 
     # QVIX
     logging.info("拉取 500ETF QVIX...")
-    qvix = fetch_qvix("500etf")
+    # 开盘前先补采上一交易日：15:05 那轮被源站「没更新」挡掉时，这里是唯一的
+    # 补救窗口（源站当晚/次日凌晨才更新分钟文件的情况常有）。见 qvix_store。
+    if os.environ.get("IC_QVIX_CATCHUP", "1").strip() != "0":
+        try:
+            from datalayer.qvix_store import catchup_prev_session
+            _cu = catchup_prev_session("500etf")
+            if _cu.get("ok"):
+                logging.warning(f"QVIX 开盘前补采成功：{_cu['date']} close={_cu['close']}")
+            elif _cu.get("date"):
+                logging.info(f"QVIX 开盘前补采：{_cu['date']} 未补（{_cu.get('reason')}）")
+            else:
+                logging.info(f"QVIX 开盘前补采跳过：{_cu.get('reason')}")
+        except Exception as e:  # noqa: BLE001
+            logging.warning(f"QVIX 开盘前补采异常（忽略）: {e}")
+    # 缺口代理补齐（2026-11-09）：源站会整天不更新（11-09 分钟文件还是 11-06 那份），
+    # 这时用上交所官方 IV 自算 + 锚定链式把最近的缺口补上，否则判据因为缺一天整轮拒判。
+    # 幂等：没缺口时直接返回，不打官方接口。见 datalayer/qvix_proxy.py。
+    if os.environ.get("IC_QVIX_PROXY_FILL", "1").strip() != "0":
+        try:
+            from datalayer.qvix_proxy import SELF_ROOTS, fill_gaps
+            for _qt in SELF_ROOTS:
+                _pr = fill_gaps(_qt)
+                if _pr.get("ok"):
+                    logging.warning(f"QVIX {_qt} 代理补缺口："
+                                    f"{', '.join(_pr['written'])}")
+        except Exception as e:  # noqa: BLE001
+            logging.warning(f"QVIX 代理补缺口异常（忽略）: {e}")
+    try:
+        qvix = fetch_qvix("500etf")
+    except Exception as e:  # noqa: BLE001
+        # 源站挂 + 本地无快照（首次部署才会这样）：不整体崩，按「QVIX 缺」处理，
+        # 让数据守门判拒判 —— 宁可明确说缺数据，也不拿旧值冒充新值。
+        logging.error(f"QVIX 拉取失败，本日按缺失处理：{e}")
+        qvix = None
+    if qvix is None or qvix.empty or "close" not in qvix.columns:
+        logging.warning("QVIX 无可用数据 → qvix 列全空，判定会走「拒判」")
+        qvix = pd.DataFrame({
+            "date": pd.to_datetime(pd.Series([], dtype="object")),
+            "close": pd.Series([], dtype="float64"),
+        })
     qvix["date"] = pd.to_datetime(qvix["date"])
 
     # 融资余额（沪市，2015 起）
@@ -190,6 +231,8 @@ def load_latest_data():
     df = df.rename(columns={"close": "qvix"})
     df = df.merge(margin, on="date", how="left")
     df = df.sort_values("date").reset_index(drop=True)
+    # 官方 QVIX 缺最新日时的自算兜底（只进 qvix_self 列，仅参考）
+    df = _attach_self_qvix(df)
     return df
 
 
@@ -208,6 +251,40 @@ def compute_vol_60d(fut: pd.Series, window: int = 60) -> pd.Series:
     """60 日年化波动率（%）"""
     log_ret = np.log(fut / fut.shift(1))
     return log_ret.rolling(window).std() * np.sqrt(252) * 100
+
+
+def _attach_self_qvix(df: pd.DataFrame, lookback: int = 6) -> pd.DataFrame:
+    """官方 QVIX 缺最新日时，用上交所官方 IV 自算一份**仅供参考**的尾部。
+
+    2026-10-26：optbbs 源站 10-23 起不回填，卡片只能显示「缺」。自算精度实测
+    （72 个交易日）：水位 +4.2%±5.8%、5 日动量相关 0.83、<-3% 阈值一致 81%
+    —— **够当参考，不够当判据**。所以这里只写进独立列 `qvix_self`，
+    绝不碰 `qvix` 列（碰了就等于偷偷改了判定依据和历史回测口径）。
+    """
+    df = df.copy()
+    df["qvix_self"] = np.nan
+    if os.environ.get("IC_QVIX_SELF_REF", "1").strip() == "0":
+        return df
+    if df.empty or pd.notna(df.iloc[-1]["qvix"]):
+        return df
+    try:
+        from datalayer.qvix_selfcalc import compute_cached
+    except Exception as e:  # noqa: BLE001
+        logging.warning(f"自算 QVIX 模块不可用: {e}")
+        return df
+    filled = 0
+    for idx, row in df.tail(lookback).iterrows():
+        try:
+            v = compute_cached(row["date"].date())
+        except Exception as e:  # noqa: BLE001
+            logging.warning(f"自算 QVIX {row['date'].date()} 失败: {e}")
+            v = None
+        if v is not None:
+            df.loc[idx, "qvix_self"] = float(v)
+            filled += 1
+    if filled:
+        logging.info(f"自算 QVIX 兜底：填了 {filled} 天（仅参考，不参与判定）")
+    return df
 
 
 def load_history() -> list:
@@ -280,6 +357,11 @@ def prepare_signals(df: pd.DataFrame) -> pd.DataFrame:
     # + 缺口守门: 窗口内缺日 → 动量无效（规则 1）
     df["qvix_mom_3d"] = _mom_with_gap_guard(df["qvix"], 3)
     df["qvix_mom_5d"] = _mom_with_gap_guard(df["qvix"], 5)
+    # 自算参考列（存在才算；口径同上，窗口缺一天就算不出来）
+    if "qvix_self" in df.columns:
+        df["qvix_self_mom_5d"] = _mom_with_gap_guard(df["qvix_self"], 5)
+    else:
+        df["qvix_self_mom_5d"] = np.nan
     df["vol_60d"] = compute_vol_60d(df["spot"], 60)
     df["margin_mom20"] = df["margin"].pct_change(20, fill_method=None)
     df["margin_pct"] = df["margin"].rolling(250).apply(
@@ -348,6 +430,34 @@ def is_pre_long_holiday(d) -> bool:
     return d0 in pre_long_holiday_dates()
 
 
+# ------------------------------------------------------------ 数据新鲜度
+def latest_closed_trading_day(now: datetime | None = None) -> date | None:
+    """按交易日历推：截至现在，最近一个**已经收盘**的交易日（不含今天）。
+
+    行情源比日历慢是常事（akshare 当天数据收盘后 3-5 小时才更新，QVIX 更慢，
+    实测能差 1 个交易日）。消息里必须明说结论基于哪一天，别让用户以为是实时数据。
+    """
+    cal = _trade_calendar()
+    if not cal:
+        return None
+    now = now or datetime.now()
+    past = [d for d in cal if d < now.date()]
+    return max(past) if past else None
+
+
+def data_lag_note(data_date_str: str, now: datetime | None = None) -> str:
+    """行情源滞后提示：应到 X，实际只取到 Y。"""
+    try:
+        data_date = datetime.strptime(str(data_date_str), "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return ""
+    latest = latest_closed_trading_day(now)
+    if latest is None or data_date >= latest:
+        return ""
+    return (f"\n> ℹ️ **行情源滞后**：按交易日历最新应到 **{latest}**，"
+            f"实际只取到 **{data_date}** —— 本条结论基于 {data_date} 收盘数据")
+
+
 # ------------------------------------------------------------ 信号强度分级
 STRONG_MARGIN_MOM = -0.03   # 融资余额 20 日动量 <= -3% → 强信号
 
@@ -375,31 +485,88 @@ def signal_strength(result: dict) -> tuple:
     return "弱", f"融资20日 {m:.2%}（>-3%，趋势性降杠杆，证据偏弱）"
 
 
+def _missing_qvix_dates(df: pd.DataFrame, tail_rows: int = 6) -> list[str]:
+    """最近几行里 QVIX 为空（= 当天源站没发布官方值）的交易日，给卡片用。
+
+    2026-11-09：卡片原来只写一个笼统的「数据不齐 / QVIX窗口缺日」，用户看不出
+    到底缺哪天、也判断不了是源站停更还是本地坏了。这里把具体日期摆出来。
+    """
+    if df is None or df.empty or "qvix" not in df.columns:
+        return []
+    tail = df.tail(tail_rows)
+    return [d.strftime("%Y-%m-%d") for d in tail.loc[tail["qvix"].isna(), "date"]]
+
+
+def _qvix_reference(df: pd.DataFrame, col: str) -> tuple[float | None, str | None, int | None]:
+    """最新交易日 QVIX 缺失时，给出「最近一个可算的动量 + 它的日期 + 滞后几行」。
+
+    只用于**显示**（卡片上把「缺」换成「截至 10-22 的动量」），
+    不参与触发判定 —— 判定口径仍然要求最新交易日的数据齐全。
+
+    返回 (mom, date_str, lag_rows)；整段都算不出动量时返回 (None, None, None)。
+    """
+    valid = df[df[col].notna()]
+    if valid.empty:
+        return None, None, None
+    last = valid.iloc[-1]
+    try:
+        pos = int(df.index.get_loc(valid.index[-1]))
+    except Exception:  # noqa: BLE001
+        pos = len(valid) - 1
+    lag = max(len(df) - 1 - pos, 0)
+    return float(last[col]), last["date"].strftime("%Y-%m-%d"), lag
+
+
 def check_bottom_signal(df: pd.DataFrame) -> dict:
     """抄底信号: RSI<44 + QVIX 5d<-3% + vol>20% + 融资20日降"""
     latest = df.iloc[-1]
-    # 数据完整性守门: 任一关键数据缺失/滞后 → 拒判(2026-10-12假触发教训)
-    stale = []
+    # 数据完整性守门: 任一关键数据缺失/滞后 → 本轮**拒判**(2026-10-12假触发教训)。
+    # ⚠️ 但守门要**按指标分开算**（2026-10-25 修）：老写法是「只要 stale 非空，
+    # qvix_ok 和 margin_ok 一起打成 False」—— QVIX 缺一天，融资那项明明
+    # -7.25% < 0 满足条件，也被显示成 ❌，用户看着像"条件不满足"。
+    # 现在：每个指标只受**自己那侧**的数据缺失影响；整体是否拒判仍看全部四项
+    # （data_ok），判定口径不变（保持严格）。
+    qvix_bad: list[str] = []
+    margin_bad: list[str] = []
     if pd.isna(latest["qvix"]):
-        stale.append("QVIX")
+        qvix_bad.append("QVIX源未回填")
     if pd.isna(latest["margin_mom20"]):
-        stale.append("融资余额")
+        margin_bad.append("融资余额")
     # 规则 1：QVIX 窗口内有缺日 → 5 日动量不可算 → 本轮不判定（并说明原因）
     if pd.notna(latest["qvix"]) and pd.isna(latest["qvix_mom_5d"]):
-        stale.append("QVIX窗口缺日")
+        qvix_bad.append("QVIX窗口缺日")
     qvix_last_date = df.loc[df["qvix"].notna(), "date"].iloc[-1] if df["qvix"].notna().any() else None
     if qvix_last_date is not None and (latest["date"] - qvix_last_date).days >= 2:
-        stale.append(f"QVIX滞后{(latest['date'] - qvix_last_date).days}天")
+        qvix_bad.append(f"QVIX滞后{(latest['date'] - qvix_last_date).days}天")
     margin_last_date = df.loc[df["margin"].notna(), "date"].iloc[-1] if df["margin"].notna().any() else None
     if margin_last_date is not None and (latest["date"] - margin_last_date).days >= 2:
-        stale.append(f"融资滞后{(latest['date'] - margin_last_date).days}天")
+        margin_bad.append(f"融资滞后{(latest['date'] - margin_last_date).days}天")
+    stale = qvix_bad + margin_bad
     if stale:
-        logging.warning(f"数据完整性守门触发({', '.join(stale)}), 本轮信号拒判")
+        logging.warning(f"数据完整性守门触发({', '.join(stale)})，缺的那一项按「无法确认」处理")
     rsi_ok = float(latest["rsi14"]) < 44
-    qvix_ok = (not stale) and pd.notna(latest["qvix_mom_5d"]) and float(latest["qvix_mom_5d"]) < -0.03
+    qvix_ok = (not qvix_bad) and pd.notna(latest["qvix_mom_5d"]) and float(latest["qvix_mom_5d"]) < -0.03
     vol_ok = float(latest["vol_60d"]) > 20
-    margin_ok = (not stale) and pd.notna(latest["margin_mom20"]) and float(latest["margin_mom20"]) < 0
+    margin_ok = (not margin_bad) and pd.notna(latest["margin_mom20"]) and float(latest["margin_mom20"]) < 0
     stale_reason = "、".join(stale) if stale else ""
+    qvix_ref_mom, qvix_ref_date, qvix_ref_lag = _qvix_reference(df, "qvix_mom_5d")
+
+    # 2026-11-09：把「拒判」拆成两种完全不同的情况（用户反馈「数据怎么又不齐了」）。
+    #   ① hard_bad：连指数/RSI/波动率都算不出来 → **真的没法判**，保持拒判；
+    #   ② 只有 QVIX / 融资缺 → 那一项「无法确认」，但其余几项照常判，
+    #      结论写成「未触发（条件X 无法确认）」；其余项全满足时升级成「⚠️待确认」。
+    # 为什么要改：缺一天 QVIX，RSI/波动率/融资三项明明算得出来且都**不满足**
+    # （离触发很远），整张卡却写「⚠️拒判（数据不齐）」= 一张纯废卡。
+    # 注意：改的只是**措辞与是否整轮作废**，判定口径一点没松 ——
+    # 缺数据永远不可能变成「触发」，最多变成「待确认」。
+    hard_bad = bool(pd.isna(latest["rsi14"]) or pd.isna(latest["vol_60d"]))
+    known_ok = [rsi_ok, vol_ok]
+    if not qvix_bad:
+        known_ok.append(qvix_ok)
+    if not margin_bad:
+        known_ok.append(margin_ok)
+    pending_confirm = bool((qvix_bad or margin_bad) and not hard_bad
+                           and all(known_ok))
     return {
         "date": latest["date"].strftime("%Y-%m-%d"),
         "spot_price": float(latest["spot"]),
@@ -407,12 +574,25 @@ def check_bottom_signal(df: pd.DataFrame) -> dict:
         "rsi14": float(latest["rsi14"]),
         "qvix": float(latest["qvix"]),
         "qvix_mom_5d": float(latest["qvix_mom_5d"]) if pd.notna(latest["qvix_mom_5d"]) else float("nan"),
+        # 参考值：最新日缺 QVIX 时，卡片显示「截至上一个有效日」的动量（仅供参考，不参与判定）
+        "qvix_mom_5d_ref": qvix_ref_mom,
+        "qvix_ref_date": qvix_ref_date,
+        "qvix_ref_lag": qvix_ref_lag,
+        # 自算兜底（2026-10-26 起；**仅参考**，不参与判定）
+        "qvix_self_val": float(latest["qvix_self"]) if pd.notna(latest.get("qvix_self")) else float("nan"),
+        "qvix_self_mom_5d": float(latest["qvix_self_mom_5d"]) if pd.notna(latest.get("qvix_self_mom_5d")) else float("nan"),
         "vol_60d": float(latest["vol_60d"]),
         "margin_mom20": float(latest["margin_mom20"]) if pd.notna(latest["margin_mom20"]) else float("nan"),
         "rsi_ok": bool(rsi_ok),
         "qvix_ok": bool(qvix_ok),
         "vol_ok": bool(vol_ok),
         "margin_ok": bool(margin_ok),
+        # 各项数据是否齐全（显示时区分「不满足」和「数据缺失」）
+        "qvix_has_data": bool(not qvix_bad),
+        "margin_has_data": bool(not margin_bad),
+        "missing_qvix_dates": _missing_qvix_dates(df),
+        "hard_bad": hard_bad,                 # True 才是真·拒判（连指数/RSI 都算不出）
+        "pending_confirm": pending_confirm,   # 其余条件已满足、只差缺数据那一项
         "triggered": bool(rsi_ok and qvix_ok and vol_ok and margin_ok),
         "data_ok": bool(not stale),
         "stale_reason": stale_reason,
@@ -446,6 +626,7 @@ def check_top_signal(df: pd.DataFrame) -> dict:
 
     warn = bool(is_high and drop_ok and margin_ok)
     confirm = bool(warn and qvix_rise_ok)
+    qvix_ref3, qvix_ref3_date, qvix_ref3_lag = _qvix_reference(df, "qvix_mom_3d")
 
     return {
         "date": latest["date"].strftime("%Y-%m-%d"),
@@ -454,6 +635,9 @@ def check_top_signal(df: pd.DataFrame) -> dict:
         "rsi14": float(latest["rsi14"]),
         "qvix": float(latest["qvix"]),
         "qvix_mom_3d": float(latest["qvix_mom_3d"]) if pd.notna(latest["qvix_mom_3d"]) else float("nan"),
+        "qvix_mom_3d_ref": qvix_ref3,
+        "qvix_ref_date": qvix_ref3_date,
+        "qvix_ref3_lag": qvix_ref3_lag,
         "vol_60d": float(latest["vol_60d"]),
         "margin_pct": float(latest["margin_pct"]) if pd.notna(latest["margin_pct"]) else float("nan"),
         "drop3": drop3,
@@ -470,6 +654,62 @@ def check_top_signal(df: pd.DataFrame) -> dict:
 def _status_icon(ok: bool) -> str:
     """状态图标"""
     return "✅" if ok else "❌"
+
+
+def _status_icon3(ok, has_data: bool = True) -> str:
+    """三态图标：满足 ✅ / 不满足 ❌ / **数据缺失 ⚠️（不是"不满足"）**。
+
+    为什么要有第三态：守门触发时（某项数据缺），那条 ❌ 会被读成
+    「条件没满足」，而真实含义是「没数据可判」。2026-10-25 用户就指着
+    「融资20日 -7.25% ❌ < 0」问「为什么 -7.25<0 显示不满足」。
+    """
+    if not has_data:
+        return "⚠️缺"
+    return "✅" if ok else "❌"
+
+
+def bottom_state_text(b: dict) -> str:
+    """抄底状态文案（2026-11-09 起："有一项缺数据"不再等于"整轮拒判"）。"""
+    if b.get("hard_bad"):
+        return "⚠️ 拒判（数据不齐）"
+    if b.get("triggered"):
+        return "🚨 触发"
+    if b.get("pending_confirm"):
+        miss = "QVIX" if not b.get("qvix_has_data", True) else "融资"
+        return f"⚠️ 待确认（{miss} 缺，其余条件已满足）"
+    if not b.get("qvix_has_data", True):
+        return "未触发（QVIX 缺，条件2 无法确认）"
+    if not b.get("margin_has_data", True):
+        return "未触发（融资缺，条件4 无法确认）"
+    return "未触发"
+
+
+def top_state_text(t: dict) -> str:
+    """顶部状态文案：QVIX 只影响「确认」，缺了照样能判「预警」。"""
+    if t.get("confirmed"):
+        return "🔴 确认"
+    if t.get("triggered"):
+        return ("⚠️ 预警（QVIX 3日缺，未确认）"
+                if pd.isna(t.get("qvix_mom_3d", float("nan"))) else "🟠 预警")
+    if pd.isna(t.get("qvix_mom_3d", float("nan"))):
+        return "未触发（QVIX 缺，确认条件无法判定）"
+    return "未触发"
+
+
+def data_gap_note(b: dict) -> str:
+    """缺数据时的说明行：**具体缺哪几天**、影响哪条条件、何时自动恢复。"""
+    if b.get("hard_bad"):
+        return (f"\n> ⚠️ **{b.get('stale_reason', '数据滞后')}**: 本轮信号拒判，"
+                f"数据补齐后自动恢复")
+    if not b.get("qvix_has_data", True):
+        missed = b.get("missing_qvix_dates") or []
+        txt = "、".join(missed) if missed else "最新交易日"
+        return (f"\n> ⚠️ **QVIX 缺 {txt}**（optbbs 源站当日没发布官方值）→ 5 日动量算不出来，"
+                f"抄底条件2 无法确认；其余条件照常判定（09:20 补判会重判，真信号第一时间推送）")
+    if not b.get("margin_has_data", True):
+        return (f"\n> ⚠️ **融资余额缺最新日**（上交所数据未更新）→ 抄底条件4 无法确认；"
+                f"其余条件照常判定")
+    return ""
 
 
 def build_bottom_message(r: dict, last_date: str, note: str = "") -> str:
@@ -569,20 +809,22 @@ def write_alert(result: dict, last_date: str, note: str = ""):
 
 def write_status(bottom: dict, top: dict):
     """每日状态：无论触发与否，都写 latest_signal.json（每日心跳）"""
+    b_state = bottom_state_text(bottom)
+    t_state = top_state_text(top)
+    qvix_mark = "✓" if bottom['qvix_ok'] else ("⚠️缺" if not bottom.get('qvix_has_data', True) else "✗")
+    margin_mark = "✓" if bottom['margin_ok'] else ("⚠️缺" if not bottom.get('margin_has_data', True) else "✗")
     summary = (
         f"日期: {bottom['date']}\n"
         f"中证500: {bottom['spot_price']:.1f}  IC期货: {bottom['fut_price']:.1f}\n"
         f"--- 抄底 ---\n"
         f"RSI(14): {bottom['rsi14']:.1f}  {'✓' if bottom['rsi_ok'] else '✗'} (< 44)\n"
-        f"QVIX 5日: {bottom['qvix_mom_5d']:.2%}  {'✓' if bottom['qvix_ok'] else '✗'} (< -3%)\n"
+        f"QVIX 5日: {bottom['qvix_mom_5d']:.2%}  {qvix_mark} (< -3%)\n"
         f"60日vol: {bottom['vol_60d']:.1f}%  {'✓' if bottom['vol_ok'] else '✗'} (> 20%)\n"
-        f"融资20日: {bottom['margin_mom20']:.2%}  {'✓' if bottom['margin_ok'] else '✗'} (< 0)\n"
+        f"融资20日: {bottom['margin_mom20']:.2%}  {margin_mark} (< 0)\n"
         f"--- 顶部 ---\n"
         f"60日新高: {'✓' if top['is_high'] else '✗'}  新高后3日: {top['drop3']:.1f}%\n"
         f"融资分位: {top['margin_pct']:.2f}   QVIX 3日: {top['qvix_mom_3d']:.2%}\n"
-        f"状态: 抄底{'🚨' if bottom['triggered'] else '未触发'} | "
-        f"顶部{'⚠️预警' if top['triggered'] else '未触发'}"
-        f"{'🔴确认' if top['confirmed'] else ''}"
+        f"状态: 抄底{b_state} | 顶部{t_state}"
     )
 
     payload = {
@@ -622,29 +864,66 @@ def notify_dingtalk(result: dict, last_date: str = None, note: str = ""):
 
 def notify_dingtalk_heartbeat(bottom: dict, top: dict, weekend: bool = False):
     """每日心跳钉钉通知（weekend=True 时是「非交易日回顾」）"""
-    # 底部状态
+    # nan 指标显示成「缺」而不是 "nan%" —— 缺数据不是"指标为 0"
+    def _pct(v) -> str:
+        return f"{v:.2%}" if pd.notna(v) else "缺"
+
+    def _num(v, fmt: str) -> str:
+        return format(v, fmt) if pd.notna(v) else "缺"
+
+    # 底部状态（三态：✅满足 / ❌不满足 / ⚠️缺=没数据可判）
+    def _qvix_show(mom, ref_mom, ref_date, ref_lag) -> str:
+        """最新交易日缺 QVIX 时，用「上一个有效日」的动量填空并标明口径。
+
+        2026-10-26：optbbs 源站 10-23/10-24 连续没回填，卡片原来只显示一个「缺」，
+        用户根本看不出是源站停更还是自己这边坏了。现在把最后能算的动量摆出来，
+        标「截至 X 日、滞后 N 日、仅参考」—— **数字给到，判定口径不变**。
+        """
+        if pd.notna(mom):
+            return f"{mom:.2%}"
+        if ref_mom is not None and pd.notna(ref_mom):
+            d = (ref_date or "")[5:]
+            return f"{ref_mom:.2%}（截至 {d}，滞后{ref_lag}日，仅参考）"
+        return "缺"
+
     b_items = [
-        f"RSI(14) = {bottom['rsi14']:.1f} {_status_icon(bottom['rsi_ok'])} < 44",
-        f"QVIX 5日 = {bottom['qvix_mom_5d']:.2%} {_status_icon(bottom['qvix_ok'])} < -3%",
-        f"60日波动率 = {bottom['vol_60d']:.1f}% {_status_icon(bottom['vol_ok'])} > 20%",
-        f"融资20日 = {bottom['margin_mom20']:.2%} {_status_icon(bottom['margin_ok'])} < 0",
+        f"RSI(14) = {bottom['rsi14']:.1f} {_status_icon3(bottom['rsi_ok'])} < 44",
+        f"QVIX 5日 = {_qvix_show(bottom['qvix_mom_5d'], bottom.get('qvix_mom_5d_ref'), bottom.get('qvix_ref_date'), bottom.get('qvix_ref_lag'))} "
+        f"{_status_icon3(bottom['qvix_ok'], bottom.get('qvix_has_data', True))} < -3%",
+        f"60日波动率 = {_num(bottom['vol_60d'], '.1f')}% {_status_icon3(bottom['vol_ok'])} > 20%",
+        f"融资20日 = {_pct(bottom['margin_mom20'])} "
+        f"{_status_icon3(bottom['margin_ok'], bottom.get('margin_has_data', True))} < 0",
     ]
     # 顶部状态
     drop_str = f"{top['drop3']:.1f}%" if pd.notna(top['drop3']) else "--"
     t_items = [
         f"60日新高 = {'✅ 是' if top['is_high'] else '❌ 否'}",
-        f"新高后3日跌幅 = {drop_str} {_status_icon(top['drop_ok'])} < -3%",
-        f"融资分位 = {top['margin_pct']:.2f} {_status_icon(top['margin_ok'])} > 90%",
-        f"QVIX 3日 = {top['qvix_mom_3d']:.2%} {_status_icon(top['qvix_rise_ok'])} > 0%",
+        f"新高后3日跌幅 = {drop_str} "
+        f"{_status_icon3(top['drop_ok'], pd.notna(top['drop3']))} < -3%",
+        f"融资分位 = {_num(top['margin_pct'], '.2f')} "
+        f"{_status_icon3(top['margin_ok'], pd.notna(top['margin_pct']))} > 90%",
+        f"QVIX 3日 = {_qvix_show(top['qvix_mom_3d'], top.get('qvix_mom_3d_ref'), top.get('qvix_ref_date'), top.get('qvix_ref3_lag'))} "
+        f"{_status_icon3(top['qvix_rise_ok'], pd.notna(top['qvix_mom_3d']))} > 0%",
     ]
     # 状态行
-    b_status = "🚨 触发" if bottom['triggered'] else "未触发"
-    t_status = "🔴 确认" if top['confirmed'] else ("🟠 预警" if top['triggered'] else "未触发")
+    b_status = bottom_state_text(bottom)
+    t_status = top_state_text(top)
 
-    # 数据滞后提示
-    stale_note = ""
-    if not bottom.get("data_ok", True):
-        stale_note = f"\n> ⚠️ **{bottom.get('stale_reason', '数据滞后')}**: 本轮信号拒判，数据补齐后自动恢复"
+    # 缺失说明（具体缺哪天 / 影响哪条条件 / 何时恢复）
+    stale_note = data_gap_note(bottom)
+
+    # 行情源滞后提示（结论基于哪个收盘日，明说）
+    lag_note = data_lag_note(bottom["date"])
+
+    # 自算兜底提示（只在这一栏出现，判定口径完全不受影响）
+    self_note = ""
+    sv = bottom.get("qvix_self_val")
+    sm = bottom.get("qvix_self_mom_5d")
+    if sv is not None and pd.notna(sv):
+        mom_txt = f"，5日 {sm:+.2%}" if (sm is not None and pd.notna(sm)) else ""
+        self_note = (f"\n> 🧮 官方 QVIX 未回填，这里是**自算**（{bottom['date']} = {sv:.1f}{mom_txt}）："
+                     f"用上交所官方 IV 按 CBOE 方差互换还原，实测水位偏差 ~4%、5 日动量相关 0.83、"
+                     f"阈值一致 81% —— **仅参考，不参与判定**")
 
     lines = [
         "## 📊 IC 非交易日回顾" if weekend else "## 📊 IC 监控日报",
@@ -661,11 +940,20 @@ def notify_dingtalk_heartbeat(bottom: dict, top: dict, weekend: bool = False):
     ]
     if stale_note:
         lines.append(stale_note)
+    if self_note:
+        lines.append(self_note)
+    if lag_note:
+        lines.append(lag_note)
     if weekend:
         lines.append("> 周末无新交易数据，以上是**最新交易日**的判定结果；"
                      "开盘前如有新信号会第一时间推送。")
     try:
-        title = "IC 非交易日回顾" if weekend else "IC 信号心跳播报"
+        if weekend:
+            title = "IC 非交易日回顾"
+        elif bottom.get("pending_confirm"):
+            title = "IC 待确认信号"      # 其余条件已满足、只差缺数据那项 → 值得单独提示
+        else:
+            title = "IC 信号心跳播报"
         if push_bot_message("\n".join(lines), title=title):
             logging.info(f"钉钉心跳已发送（{bottom['date']}{'（周末回顾）' if weekend else ''}）")
         else:
@@ -769,6 +1057,9 @@ def run_once(force: bool = False, dry_run: bool = False, heartbeat: bool = True)
         "top_triggered": top["triggered"],
         "top_confirmed": top["confirmed"],
         "data_ok": bottom.get("data_ok", True),
+        "hard_bad": bool(bottom.get("hard_bad", False)),
+        "pending_confirm": bool(bottom.get("pending_confirm", False)),
+        "missing_qvix_dates": bottom.get("missing_qvix_dates") or [],
         "sent": [],
     }
 
@@ -819,7 +1110,8 @@ def run_once(force: bool = False, dry_run: bool = False, heartbeat: bool = True)
             payload = write_alert(bottom, last_date, note)
             notify_dingtalk(bottom, last_date, note)
             emit_signal(payload)
-            save_state(last_push_data_date=bottom["date"])
+            save_state(last_push_data_date=bottom["date"],
+                       last_signal_push_day=now.strftime("%Y-%m-%d"))
             result["sent"].append("bottom")
     # 顶部信号（预警/确认）
     elif top["triggered"] and (force or not top_done):
@@ -832,26 +1124,34 @@ def run_once(force: bool = False, dry_run: bool = False, heartbeat: bool = True)
             payload = write_alert(top, last_date, note)
             notify_dingtalk(top, last_date, note)
             emit_signal(payload)
-            save_state(last_push_data_date=top["date"])
+            save_state(last_push_data_date=top["date"],
+                       last_signal_push_day=now.strftime("%Y-%m-%d"))
             result["sent"].append(top["type"])
 
-    # 没发信号 → 每日心跳（同一天只发一次；今天已有信号就不再补心跳）
+    # 没发信号 → 每日心跳：**按运行日去重**（每天早上必有一条），不按数据日去重。
+    # 2026-10-25 改：老逻辑有两条会把整轮吞掉的分支 ——
+    #   ① 「数据日没变就跳过」→ 周六推过 10-23，周日 08:50 判 no-new-data → 静默；
+    #   ② 「触发过就不补心跳」→ 信号是**昨天**按同一数据日推的，今天也静默。
+    # 现在：信号仍按**数据日**去重（already_alerted，同一条信号不重推），
+    # 心跳按**运行日**去重 → 每个早上必有一条结论（含"信号此前已触发"的状态）。
+    # 同一天里信号已经推过 → 不再补日报（同一天不刷两条）。
     if not result["sent"] and heartbeat:
         today = now.strftime("%Y-%m-%d")
-        if bottom["triggered"] or top["triggered"]:
-            logging.info("今日信号已推送过（%s），不再补发心跳", bottom["date"])
+        st = load_state()
+        if st.get("last_signal_push_day") == today and not force:
+            logging.info(f"{today} 已推过信号，不再补发心跳")
             result["skipped"] = "signal-already-sent"
-        elif weekend and not force and load_state().get("last_push_data_date") == bottom["date"]:
-            # 周末第二轮（周日）：数据还是周五那份，没新东西就别刷屏
-            logging.info("周末回顾：%s 的数据没有更新，跳过（不刷屏）", bottom["date"])
-            result["skipped"] = "no-new-data"
-        elif (load_state().get("heartbeat_day") == today) and not force:
+        elif st.get("heartbeat_day") == today and not force:
             logging.info(f"{today} 心跳已发过，跳过")
             result["skipped"] = "heartbeat-already-sent"
         elif dry_run:
             logging.info("[dry-run] 心跳: %s 抄底未触发 / 顶部未触发", bottom["date"])
             result["sent"].append("heartbeat(dry-run)")
         else:
+            if bottom["triggered"] or top["triggered"]:
+                logging.info(
+                    "信号此前已按数据日 %s 推送过，今天补一条日报说明当前状态",
+                    bottom["date"])
             write_status(bottom, top)
             notify_dingtalk_heartbeat(bottom, top, weekend=weekend)
             save_state(heartbeat_day=today, last_push_data_date=bottom["date"])
